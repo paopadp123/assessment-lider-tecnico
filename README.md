@@ -24,6 +24,7 @@ _Pendiente._
 
 ## 4. Decisiones técnicas y por qué
 - [ADR 0001 — PostgreSQL como base de datos transaccional](docs/adr/0001-postgresql-como-base-de-datos.md)
+- [ADR 0002 — Outbox en PostgreSQL + RabbitMQ para las tareas asíncronas](docs/adr/0002-outbox-y-rabbitmq.md)
 
 ## 5. Arquitectura móvil
 _Pendiente._

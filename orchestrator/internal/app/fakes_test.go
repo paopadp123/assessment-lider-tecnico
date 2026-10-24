@@ -20,15 +20,17 @@ type storedPaymentEvent struct {
 // fakeRepo es un repositorio en memoria que respeta el contrato del puerto,
 // incluido abortar con un contexto cancelado, como hace pgx.
 type fakeRepo struct {
-	mu        sync.Mutex
-	orders    map[order.OrderID]order.Order
-	keys      map[string]IdempotencyKey
-	byKey     map[string]order.OrderID
-	byPayment map[order.PaymentID]order.OrderID
-	events    []order.Event
-	payEvents []*storedPaymentEvent
-	nextID    int
-	onCreate  func() // se ejecuta tras crear la orden; permite simular eventos durante la cotización
+	mu          sync.Mutex
+	orders      map[order.OrderID]order.Order
+	keys        map[string]IdempotencyKey
+	byKey       map[string]order.OrderID
+	byPayment   map[order.PaymentID]order.OrderID
+	events      []order.Event
+	payEvents   []*storedPaymentEvent
+	commands    []Command
+	deadLetters []DeadLetter
+	nextID      int
+	onCreate    func() // se ejecuta tras crear la orden; permite simular eventos durante la cotización
 }
 
 func newFakeRepo() *fakeRepo {
@@ -64,14 +66,72 @@ func (r *fakeRepo) Create(ctx context.Context, key IdempotencyKey, o order.Order
 	return o, true, nil
 }
 
-func (r *fakeRepo) SaveTransition(ctx context.Context, o order.Order, ev order.Event) error {
+// SaveTransition replica el control optimista del repositorio real: si la orden ya no está en el
+// estado de origen del evento, devuelve ErrInvalidTransition sin cambiar nada.
+func (r *fakeRepo) SaveTransition(ctx context.Context, o order.Order, ev order.Event, cmds ...Command) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if err := r.checkFromLocked(o.ID, ev.From); err != nil {
+		return err
+	}
 	r.orders[o.ID] = o
 	r.events = append(r.events, ev)
+	r.commands = append(r.commands, cmds...)
+	return nil
+}
+
+// checkFromLocked replica el UPDATE ... WHERE status = <origen>: una orden inexistente o que ya cambió
+// de estado no se actualiza.
+func (r *fakeRepo) checkFromLocked(id order.OrderID, from order.Status) error {
+	if cur, ok := r.orders[id]; !ok || cur.Status != from {
+		return fmt.Errorf("%w: order %s is no longer in %s", order.ErrInvalidTransition, id, from)
+	}
+	return nil
+}
+
+// fakeSnapshot permite simular el rollback de una transacción.
+type fakeSnapshot struct {
+	orders    map[order.OrderID]order.Order
+	byPayment map[order.PaymentID]order.OrderID
+	events    int
+	payEvents []storedPaymentEvent
+}
+
+func (r *fakeRepo) snapshotLocked() fakeSnapshot {
+	s := fakeSnapshot{orders: map[order.OrderID]order.Order{}, byPayment: map[order.PaymentID]order.OrderID{}, events: len(r.events)}
+	for k, v := range r.orders {
+		s.orders[k] = v
+	}
+	for k, v := range r.byPayment {
+		s.byPayment[k] = v
+	}
+	for _, p := range r.payEvents {
+		s.payEvents = append(s.payEvents, *p)
+	}
+	return s
+}
+
+func (r *fakeRepo) rollbackLocked(s fakeSnapshot) {
+	r.orders, r.byPayment, r.events = s.orders, s.byPayment, r.events[:s.events]
+	r.payEvents = r.payEvents[:0]
+	for i := range s.payEvents {
+		p := s.payEvents[i]
+		r.payEvents = append(r.payEvents, &p)
+	}
+}
+
+func (r *fakeRepo) RecordDeadLetter(_ context.Context, dl DeadLetter) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, existing := range r.deadLetters {
+		if existing.MessageID == dl.MessageID {
+			return nil
+		}
+	}
+	r.deadLetters = append(r.deadLetters, dl)
 	return nil
 }
 
@@ -81,6 +141,10 @@ func (r *fakeRepo) MarkPaymentPending(ctx context.Context, o order.Order, ev ord
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if err := r.checkFromLocked(o.ID, ev.From); err != nil {
+		return order.Order{}, err
+	}
+	snap := r.snapshotLocked()
 	r.orders[o.ID] = o
 	r.byPayment[o.PaymentID] = o.ID
 	r.events = append(r.events, ev)
@@ -94,6 +158,7 @@ func (r *fakeRepo) MarkPaymentPending(ctx context.Context, o order.Order, ev ord
 	sort.SliceStable(pending, func(i, j int) bool { return pending[i].ev.OccurredAt.Before(pending[j].ev.OccurredAt) })
 	for _, s := range pending {
 		if _, err := r.applyLocked(o.ID, s, apply); err != nil {
+			r.rollbackLocked(snap) // como Postgres: si algo falla, no queda nada de esta transacción
 			return order.Order{}, err
 		}
 	}
@@ -111,6 +176,7 @@ func (r *fakeRepo) RecordPaymentEvent(ctx context.Context, ev PaymentEvent, appl
 			return PaymentEventResult{Outcome: PaymentDuplicate}, nil
 		}
 	}
+	snap := r.snapshotLocked()
 	s := &storedPaymentEvent{ev: ev}
 	r.payEvents = append(r.payEvents, s)
 	id, ok := r.byPayment[ev.PaymentID]
@@ -119,6 +185,7 @@ func (r *fakeRepo) RecordPaymentEvent(ctx context.Context, ev PaymentEvent, appl
 	}
 	outcome, err := r.applyLocked(id, s, apply)
 	if err != nil {
+		r.rollbackLocked(snap) // ni el evento ni el cambio de estado quedan, igual que en Postgres
 		return PaymentEventResult{}, err
 	}
 	return PaymentEventResult{Outcome: outcome, OrderID: id}, nil
@@ -169,6 +236,7 @@ func (q *fakeQuoter) Quote(ctx context.Context, _ QuoteRequest) (order.Quote, er
 }
 
 // fakePSP devuelve, en orden, los errores configurados y después el paymentId "pay-1".
+// Como un PSP real con Idempotency-Key, la misma orden recibe siempre el mismo paymentId.
 type fakePSP struct {
 	errs  []error
 	calls int
@@ -182,4 +250,44 @@ func (p *fakePSP) CreatePayment(_ context.Context, req PaymentRequest) (order.Pa
 		return "", p.errs[p.calls-1]
 	}
 	return "pay-1", nil
+}
+
+// fakeOutbox simula la outbox: los mensajes que el publicador rechaza siguen pendientes.
+type fakeOutbox struct {
+	pending   []OutboxMessage
+	published []OutboxMessage
+}
+
+func (f *fakeOutbox) PublishPending(ctx context.Context, limit int, publish func(context.Context, OutboxMessage) error) (int, error) {
+	var still []OutboxMessage
+	n := 0
+	for i, m := range f.pending {
+		if i >= limit {
+			still = append(still, m)
+			continue
+		}
+		if err := publish(ctx, m); err != nil {
+			m.Attempts++
+			still = append(still, m)
+			continue
+		}
+		f.published = append(f.published, m)
+		n++
+	}
+	f.pending = still
+	return n, nil
+}
+
+// fakePublisher falla en los mensajes indicados y acepta el resto.
+type fakePublisher struct {
+	failFor map[string]bool
+	sent    []string
+}
+
+func (p *fakePublisher) Publish(_ context.Context, m OutboxMessage) error {
+	if p.failFor[m.MessageID] {
+		return errors.New("broker did not confirm")
+	}
+	p.sent = append(p.sent, m.MessageID)
+	return nil
 }

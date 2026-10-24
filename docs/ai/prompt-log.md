@@ -114,3 +114,55 @@ Formato de salida: 1) plan breve de archivos y tablas y espera OK; 2) código + 
 
 **Qué se agregó y por qué:** el original solo nombraba la HU. Se agregaron el contrato del PSP, el caso exigido de APPROVED antes de PAYMENT_PENDING con su solución, la definición de qué se firma (el contrato no lo dice), la idempotencia hacia el PSP, el manejo de eventos contradictorios y la decisión del usuario (pago síncrono).
 **Resultado:** HU-02 terminada, 7 paquetes de pruebas en verde con rojo real primero (dominio y casos de uso). La prueba de la carrera se validó a propósito: sin el advisory lock falla 3 de 3 veces. Errores de la IA: (1) el fake del repositorio volvió a ser complaciente (guardaba ante un error que el repositorio real revierte); lo detectó el QA. (2) Firma ausente respondía 400 en vez del 401 que pedía el propio prompt. (3) El QA aplicó la regla "un timeout no autoriza a reemitir" al PSP en vez de al emisor; se descartó con argumento. (4) Antigravity propuso cambios que contradicen el contrato (firma en header) y reportó como bug un caso que el diseño cubre. Ver docs/ai/revisiones-cruzadas.md.
+
+## 2026-10-24 01:07 — [HU-03] Orquestador: outbox + RabbitMQ, reintentos y DLQ
+**Herramienta:** Claude Code (skill /prompt)
+
+**Original (tal como se escribió):**
+> si, vamos con outbox y rabbitmq pero enteonces toca cambiar el issue, ademas toca agregar conceptos de colas para estudas
+
+**Refinado (ejecutado):**
+```text
+[HU-03] Orquestador: outbox + RabbitMQ, reintentos con backoff y jitter, y DLQ (issue #4)
+
+Contexto:
+- dev tiene HU-01 y HU-02. Hoy POST /orders llama al cotizador y al PSP dentro de la petición (síncrono).
+- Hallazgo pendiente de HU-02 (QA y Antigravity): si el proceso muere entre el OK del PSP y el guardado de
+  PAYMENT_PENDING, el cobro queda huérfano.
+- Enunciado 4.2.A: reintentos con backoff exponencial y jitter, DLQ, outbox. 4.2.E: docker compose debe levantar "cache o cola".
+- Decisión del usuario: outbox en PostgreSQL + RabbitMQ (ADR 0002).
+
+Objetivo: toda llamada a un tercero que hoy depende de que el proceso no se caiga pasa a una tarea durable: se escribe
+en la outbox en la misma transacción del cambio de estado, un despachador la publica en RabbitMQ y un worker la ejecuta
+con reintentos; lo que agota los reintentos queda en una DLQ visible.
+
+Alcance concreto:
+- La intención de pago pasa a asíncrona (decisión del usuario): al quedar QUOTED se escribe "request_payment" en la
+  outbox y POST /orders responde 201 con la orden en QUOTED. La cotización sigue síncrona.
+  El worker pide el pago con Idempotency-Key = orderId; una reentrega tras una caída obtiene el mismo paymentId.
+- La infraestructura queda lista para que HU-04 publique "issue_policy" al quedar PAID.
+
+Restricciones:
+- github.com/rabbitmq/amqp091-go; RabbitMQ 4 con interfaz de administración en el compose.
+- Outbox con FOR UPDATE SKIP LOCKED en lotes, publisher confirms, published_at solo tras confirmación.
+- Colas de reintento por intento con TTL de vuelta a la cola de trabajo (backoff base·2ⁿ con jitter); agotados → DLQ con motivo.
+- Consumidor idempotente, ack manual tras guardar, prefetch acotado. Hexagonal; errores con %w; slog sin datos sensibles.
+
+Criterios de aceptación (con prueba):
+1. Cambio de estado y fila de outbox en la misma transacción.
+2. Sin confirmación del broker la fila sigue pendiente y se reintenta.
+3. Falla transitoria del PSP → reintento con backoff y jitter; éxito posterior → PAYMENT_PENDING.
+4. Agotados los reintentos → DLQ con motivo e intentos; orden en FAILED PAYMENT_UNAVAILABLE.
+5. Mensaje entregado dos veces → un solo efecto.
+6. Recuperación del cobro huérfano por reentrega con la misma Idempotency-Key.
+7. CI con servicio rabbitmq; integración obligatoria en CI.
+
+Además: actualizar el issue #4; ADR 0002; conceptos de colas en GUIA_ESTUDIO.md con su equivalente en AWS.
+
+Fuera de alcance: circuit breaker y emisión (HU-04), reconciliación (HU-05), correlation-id (HU-06), consola de la DLQ (HU-09).
+
+Formato de salida: 1) plan y espera OK; 2) código + pruebas rojo → verde; 3) issue, ADR y guía; 4) QA + /cerrar-hu, sin commit.
+```
+
+**Qué se agregó y por qué:** el original solo confirmaba la decisión de RabbitMQ. Se agregaron el alcance concreto (solo el pago pasa a asíncrono, decisión aprobada por el usuario tras explicarle el impacto en el comprador), cómo se cierra el hallazgo del cobro huérfano de HU-02, la topología de reintentos y DLQ, las pruebas de integración en CI y la lista de conceptos de colas pedida para estudiar.
+**Resultado:** HU-03 terminada: 7 paquetes en verde, integración real contra PostgreSQL y RabbitMQ, prueba de humo con recuperación (PAID tras 2 fallas del PSP) y DLQ (FAILED tras 4 intentos). Ajuste aprobado durante la ejecución: idempotencia por estado en lugar de tabla de mensajes procesados. Errores de la IA detectados por la propia IA antes de cualquier revisor: (1) una prueba de atomicidad de la outbox era un falso positivo (la falla ocurría antes del insert que debía probar); (2) la prueba de reintento no medía la espera (aserción `> 0` con jitter); (3) a esta misma entrada le había puesto una hora inventada (01:40) en vez de la real (01:07), corregida con el registro automático del hook; (4) el hook registraba los informes del agente QA como prompts del usuario. Las pruebas de concurrencia se validaron quitando el lock a propósito.

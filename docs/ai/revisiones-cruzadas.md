@@ -50,3 +50,26 @@ Cada HU la escribe Claude Code (Opus) y la revisan dos IA distintas antes del me
 | `t.Skip` local y `TestParsePaymentStatus` "trivial" | Antigravity | Descartado (repetido de HU-01; la segunda prueba cubre la frontera con un sistema externo) | Sin cambio |
 
 **Lectura.** En HU-02 Antigravity aportó 1 cambio de 12 y repitió patrones de HU-01. Propuso endurecimientos genéricos de webhooks sin considerar lo que impone el contrato, y un "bug" que el diseño ya cubre. Los dos hallazgos válidos más importantes (el cobro huérfano) coinciden con el QA: cuando dos revisores independientes coinciden, la señal es fuerte.
+
+## HU-03 — Outbox + RabbitMQ, reintentos y DLQ
+
+| Hallazgo | Lo encontró | Veredicto | Acción |
+|---|---|---|---|
+| La espera de confirmación del broker no tenía tope: un broker colgado bloquearía el despachador con los locks de la outbox tomados | QA (Haiku) | Válido, importante | Timeout de 5 s por publicación; sin confirmación, el mensaje queda pendiente |
+| Errores de `Nack` ignorados | QA (Haiku) | Válido | Se loguean |
+| El fake no hacía rollback si fallaba la decisión de dominio (el repositorio real sí) | QA (Haiku) | Válido (tercer fake complaciente del proyecto) | El fake simula rollback, con prueba nueva |
+| El fake permitía transicionar una orden inexistente | QA (Haiku) | Válido | Devuelve `ErrInvalidTransition`, como el UPDATE real |
+| Con jitter = 0 el mensaje de reintento quedaba sin TTL | QA (Haiku) | Válido, severidad baja | TTL mínimo de 1 ms |
+| Si el canal del publicador se cierra, el despachador seguía intentando sin terminar | QA (Haiku) | Válido | `main` vigila el cierre y termina el proceso para que se reinicie |
+| Si falla la copia a la DLQ, la reentrega hace ack y la copia del broker se pierde | QA (Haiku) | Válido, impacto bajo: la fila en `dead_letters` (fuente para operaciones) sí queda | Documentado en el código |
+| Timeout del PSP "reemite sin consultar" | QA (Haiku) | **Descartado (repetido de HU-02):** la regla es del emisor; el PSP se protege con `Idempotency-Key` | Sin cambio |
+| Errores de infraestructura reintentan sin tope | QA (Haiku) | Decisión deliberada: un error de base de datos no debe mandar el mensaje a la DLQ | Sin cambio; se observa por el nivel de reintento y los logs WARN |
+| Bloqueo de cabeza de línea por TTL dentro de un nivel de reintento | QA (Haiku) | Conocido y documentado en el ADR 0002 | Sin cambio |
+
+**Verificaciones propias antes de cualquier revisor:**
+- Se quitó `FOR UPDATE SKIP LOCKED` a propósito: la prueba de despachadores concurrentes detectó un mensaje publicado dos veces.
+- Se detectó y corrigió un falso positivo propio (la prueba de atomicidad de la outbox fallaba antes del insert que debía probar) y una aserción débil (reintento sin medir la espera).
+
+**Lectura.** El QA repitió por segunda vez la confusión entre la regla del emisor y el PSP: una regla correcta aplicada al tercero equivocado. Y por tercera HU seguida apareció un fake más permisivo que el sistema real. Lección para la política de IA del equipo: los dobles de prueba escritos por la IA deben revisarse contra el comportamiento del sistema real, no solo contra la interfaz.
+
+_Pendiente: revisión de Antigravity sobre el PR #25._

@@ -424,3 +424,48 @@
 > Impacto: Evalúa un switch simple de dos constantes de string (APPROVED, REJECTED). No prueba ninguna transición de estado, validación de negocio ni efecto en la orden. Solo incrementa métricas de cobertura superficial.
 > </pasted_content id="5853">
 > 
+
+### 2026-10-24 00:36 · Claude Code
+> en que momoento hago el pr de dev a main?
+
+### 2026-10-24 00:42 · Claude Code
+> list en el 10 hacemos pr con un docker funcionando, recuerda ponerme que es un orquestador cual es el orquestador aca y para que funciona ya hice el merge en dev
+
+### 2026-10-24 00:44 · Claude Code
+> que es un outbox
+
+### 2026-10-24 00:47 · Claude Code
+> por que lo hicimos asi y no por rabbitMQ? no era mas facil o go lo reemplaza?
+
+### 2026-10-24 00:56 · Claude Code
+> si, vamos con outbox y rabbitmq /prompt pero enteonces toca cambiar el issue, ademas toca agregar conceptos de colas para estudas
+
+### 2026-10-24 01:07 · Claude Code
+> Hay un cambio de comportamiento que debes aprobar (el ❓): POST /orders dejaría de devolver el pago y respondería con la orden en QUOTED, mientras el pago avanza en segundo plano. Es lo correcto para la escala de 50 solicitudes por segundo y para la resiliencia, pero cambia lo que verás en la demo. no entendi explicame en muy corto por que tengo que tomar de decision
+
+### 2026-10-24 01:07 · Claude Code
+> si, apruebo el cambio, ejecútalo
+
+### 2026-10-24 01:13 · Claude Code
+> toca estudiar jitter, que es adr, 1 y 2 ok,
+
+### 2026-10-24 01:15 · Claude Code
+> por estado como recomiendas, avanza con el código
+
+### 2026-10-24 01:24 · Claude Code
+> como vamos de tiempo?
+
+### 2026-10-24 01:26 · Claude Code
+> terminemos h3 y voy a descansar
+
+### 2026-10-24 01:31 · Claude Code
+> ok, haz los commits y el pr
+
+### 2026-10-24 01:32 · Claude Code
+> osea que era mejor no hacer rabit si hago con aws? que es lo que piedieron?
+
+### 2026-10-24 01:33 · Claude Code
+> agrega eso a la guía de estudio
+
+### 2026-10-24 01:33 · Claude Code
+> ok, haz los commits y el pr

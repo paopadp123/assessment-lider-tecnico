@@ -13,10 +13,13 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	amqp "github.com/rabbitmq/amqp091-go"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/adapters/postgres"
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/adapters/psp"
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/adapters/quoter"
+	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/adapters/rabbitmq"
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/app"
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/httpapi"
 )
@@ -54,6 +57,10 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("PSP_WEBHOOK_SECRET: %w", err)
 	}
+	rabbitURL, err := requiredEnv("RABBITMQ_URL")
+	if err != nil {
+		return err
+	}
 
 	pool, err := pgxpool.New(ctx, dbURL)
 	if err != nil {
@@ -64,11 +71,34 @@ func run(logger *slog.Logger) error {
 		return fmt.Errorf("migrate: %w", err)
 	}
 
+	conn, err := amqp.Dial(rabbitURL)
+	if err != nil {
+		return fmt.Errorf("connect rabbitmq: %w", err)
+	}
+	defer conn.Close()
+	topo := rabbitmq.Topology{RetryLevels: 3}
+	topoCh, err := conn.Channel()
+	if err != nil {
+		return fmt.Errorf("open topology channel: %w", err)
+	}
+	if err := topo.Declare(topoCh); err != nil {
+		return fmt.Errorf("declare topology: %w", err)
+	}
+	_ = topoCh.Close()
+	publisher, err := rabbitmq.NewPublisher(conn, topo)
+	if err != nil {
+		return err
+	}
+	defer publisher.Close()
+
 	repo := postgres.NewOrderRepository(pool)
 	quoteClient := quoter.NewClient(quoterURL, &http.Client{})
 	pspClient := psp.NewClient(pspURL, &http.Client{})
-	createOrder := app.NewCreateOrder(repo, quoteClient, pspClient, logger)
+	createOrder := app.NewCreateOrder(repo, quoteClient, logger)
 	handlePayment := app.NewHandlePaymentWebhook(repo, logger)
+	requestPayment := app.NewRequestPayment(repo, repo, pspClient, logger)
+	dispatcher := app.NewDispatcher(repo, publisher, logger)
+	worker := rabbitmq.NewWorker(conn, topo, requestPayment, logger, time.Second)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", httpapi.Health)
@@ -81,30 +111,40 @@ func run(logger *slog.Logger) error {
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second, // corta clientes que envían el cuerpo a goteo (slowloris)
-		// Cubre el peor caso de cotizar y pedir el pago con sus reintentos (presupuesto de 35 s).
-		// Baja cuando las llamadas a terceros pasen a la outbox (HU-03).
-		WriteTimeout: 40 * time.Second,
+		WriteTimeout:      20 * time.Second, // cubre la cotización con sus reintentos; el pago ya no va en la petición
 	}
 
-	errCh := make(chan error, 1)
-	go func() {
+	// API, despachador de la outbox y worker de pagos corren juntos en este proceso. Si cualquiera falla
+	// (p. ej. se cae la conexión con RabbitMQ), se detiene todo y el orquestador de contenedores lo reinicia.
+	// En producción serían despliegues separados que escalan por separado (ver ADR 0002).
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
 		logger.Info("orchestrator listening", "addr", addr)
-		errCh <- srv.ListenAndServe()
-	}()
-
-	select {
-	case err := <-errCh:
-		if !errors.Is(err, http.ErrServerClosed) {
+		if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("serve: %w", err)
 		}
-	case <-ctx.Done():
+		return nil
+	})
+	g.Go(func() error { return dispatcher.Run(gctx) })
+	publisherClosed := publisher.Closed()
+	g.Go(func() error {
+		select {
+		case <-gctx.Done():
+			return nil
+		case err := <-publisherClosed:
+			return fmt.Errorf("rabbitmq publisher channel closed: %v", err)
+		}
+	})
+	g.Go(func() error { return worker.Run(gctx) })
+	g.Go(func() error {
+		<-gctx.Done()
 		logger.Info("shutting down")
-	}
-
-	// Termina las solicitudes en curso antes de salir, para no dejar órdenes a medias.
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
-	defer cancel()
-	return srv.Shutdown(shutdownCtx)
+		// Termina las solicitudes en curso antes de salir, para no dejar órdenes a medias.
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+		defer cancel()
+		return srv.Shutdown(shutdownCtx)
+	})
+	return g.Wait()
 }
 
 func requiredEnv(key string) (string, error) {

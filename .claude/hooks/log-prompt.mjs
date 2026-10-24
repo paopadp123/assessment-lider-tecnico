@@ -15,6 +15,8 @@ process.stdin.on("end", () => {
     const { prompt = "", cwd = process.cwd() } = JSON.parse(raw);
     // "#nolog" en el mensaje lo deja fuera de la bitácora (notas personales, dudas de estudio).
     if (!prompt.trim() || /#nolog\b/i.test(prompt)) return;
+    // Los informes de subagentes llegan por el mismo canal, pero no son prompts escritos por la persona.
+    if (prompt.trimStart().startsWith("<agent-message")) return;
 
     let clean = prompt;
     for (const pattern of SECRET_PATTERNS) clean = clean.replace(pattern, "<REDACTADO>");

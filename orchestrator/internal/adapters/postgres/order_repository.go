@@ -85,10 +85,13 @@ func (r *OrderRepository) byIdempotencyKey(ctx context.Context, key app.Idempote
 	return r.Get(ctx, orderID)
 }
 
-// SaveTransition guarda el nuevo estado y su evento en la misma transacción.
-func (r *OrderRepository) SaveTransition(ctx context.Context, o order.Order, ev order.Event) error {
+// SaveTransition guarda el nuevo estado, su evento y los comandos de la outbox en la misma transacción.
+func (r *OrderRepository) SaveTransition(ctx context.Context, o order.Order, ev order.Event, cmds ...app.Command) error {
 	return pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
-		return saveTransition(ctx, tx, o, ev)
+		if err := saveTransition(ctx, tx, o, ev); err != nil {
+			return err
+		}
+		return insertCommands(ctx, tx, cmds)
 	})
 }
 
