@@ -301,3 +301,56 @@ prompt de la revisión A para Antigravity (HU-03 a HU-05). Sin commit ni push ha
 
 **Qué se agregó y por qué:** el original solo nombraba la HU. Se agregó qué hacer con cada estado atascado (incluidos los pendientes de QA y Antigravity de HU-01 y HU-02), que PAYMENT_PENDING solo se puede hacer visible porque el PSP no tiene consulta, la transición REFUND_REQUIRED → ISSUING para "reintentar emisión", y el login JWT. El usuario resolvió las dos dudas: falla definitiva en la 3.ª ronda e identidad con JWT. Primero dijo "no quiero autenticación" y luego eligió JWT al confirmar: la IA preguntó con opciones cerradas en lugar de suponer.
 **Resultado:** HU-05 terminada: 9 paquetes en verde con integración real y prueba de humo con el binario (login, 401 sin token, SSE en vivo, línea de tiempo con actor, 409 y el reconciliador recuperando una orden QUOTED vieja al arrancar). Validaciones por mutación: sin `SKIP LOCKED` dos reconciliadores tomaron la misma orden (3/3); sin el hash ficticio, el login reveló qué usuarios existen. Errores de la IA: (1) diseñó el SSE suponiendo que el orden de los IDs es el orden de los commits; un evento que confirma tarde se habría perdido. Lo detectó el agente QA (Haiku), cuya solución propuesta (`xmin`) también tenía un defecto, y se resolvió con espera ante huecos. (2) Dejó valores de ejemplo usables para el secreto JWT y la contraseña en `.env.example` (QA). (3) Primero propuso una cabecera sin autenticación; el usuario eligió JWT al confirmar con una pregunta cerrada.
+
+## 2026-10-24 15:18 — [HU-06] Trazabilidad, salud y contrato OpenAPI
+**Herramienta:** Claude Code (skill /prompt)
+
+**Original (tal como se escribió):**
+> HU-06 con el /prompt
+
+**Ajuste del usuario al revisar el refinado:**
+> que es opon api? si correlation id unico por compra
+
+**Refinado (ejecutado):**
+```text
+[HU-06] Trazabilidad, salud y contrato OpenAPI (issue #7)
+
+Contexto:
+- HU-01..05 mergeadas. Saltos asíncronos: POST /orders → outbox → RabbitMQ → worker → PSP / ACL;
+  webhook del PSP; reconciliador y acciones de operadores.
+- Placa y documento ya se enmascaran por tipo (order/identity.go). No hay correlation-id.
+- /health solo indica que el proceso vive. No hay OpenAPI; la consola (HU-09) generará sus tipos
+  TypeScript desde él.
+- Enunciado: correlation-id propagado en todos los saltos y en los logs; ningún dato sensible en claro.
+
+Objetivo: seguir cualquier compra de punta a punta con un solo id, informar si el orquestador
+está listo para recibir tráfico y publicar su contrato HTTP verificado contra las respuestas reales.
+
+Restricciones:
+- Go, misma arquitectura; migración nueva si hace falta.
+- Handler de slog que agrega correlation_id desde el contexto.
+- OpenAPI 3.0 escrito a mano (orchestrator/api/openapi.yaml), servido en GET /openapi.yaml y
+  validado en pruebas con kin-openapi contra las respuestas reales.
+- Rojo → verde; Go explicado en 3–4 líneas; guía de estudio.
+
+Criterios de aceptación:
+1. Correlation-id ÚNICO POR COMPRA (decisión del usuario): POST /orders acepta X-Correlation-ID
+   validado o genera uno y lo devuelve; se guarda en la orden y lo heredan outbox → cabecera AMQP →
+   worker → X-Correlation-ID hacia cotizador, PSP y ACL, el webhook y el reconciliador. Acciones de
+   operadores y login llevan uno propio. Pruebas en httptest, integración y logs.
+2. Barrido de datos sensibles sobre el flujo completo con logger en memoria: falla si aparece
+   placa, documento, token o contraseña en claro.
+3. GET /health/live y GET /health/ready (PostgreSQL y RabbitMQ; 503 con el componente que falla);
+   /health como alias de live.
+4. OpenAPI con todas las rutas, esquemas, errores y seguridad bearer; prueba que falla si una ruta
+   registrada no está en el contrato.
+
+Fuera de alcance: OpenTelemetry, métricas, consola y generación de tipos (HU-09), ACL (HU-07),
+simulador (HU-08).
+
+Formato de salida: plan corto y OK; código + pruebas en verde (también Linux con -race); QA;
+commits propuestos. Sin commit ni push hasta el OK.
+```
+
+**Qué se agregó y por qué:** el original solo nombraba la HU. Se agregó cómo sobrevive el correlation-id a los saltos asíncronos (una cabecera HTTP se pierde en la base y en la cola), una prueba de barrido de datos sensibles sobre el flujo completo y un OpenAPI verificado contra las respuestas reales para que la consola no reciba tipos falsos. El usuario eligió un id único por compra.
+**Resultado:** HU-06 terminada: 10 paquetes en verde (también en Linux con -race) y prueba de humo de punta a punta: el PSP recibió el correlation-id del cliente desde el worker, después de la outbox y RabbitMQ. El contrato OpenAPI se valida contra las respuestas reales; una mutación (renombrar `policyNumber`) hizo fallar la prueba. Errores de la IA: (1) dejó los logs de error de los handlers sin el correlation-id (QA); (2) escribió en el contrato un ejemplo de placa enmascarada que no coincide con el código; (3) el primer esquema aceptaba campos extra, así que un campo renombrado no se habría detectado: lo vio la propia IA al diseñar la mutación.
