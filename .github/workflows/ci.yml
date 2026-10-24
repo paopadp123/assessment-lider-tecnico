@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev, "feature/**"]
+  pull_request:
+    branches: [main, dev]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  orchestrator:
+    name: Orchestrator (Go)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: orchestrator
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: orchestrator/go.mod
+          cache-dependency-path: orchestrator/go.sum
+
+      - name: Format
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test (race detector)
+        run: go test -race -count=1 ./...
+
+  issuing-service:
+    name: Issuing service (.NET)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: issuing-service
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: issuing-service/global.json
+
+      - name: Restore
+        run: dotnet restore IssuingService.slnx
+
+      - name: Build (analyzers, warnings as errors)
+        run: dotnet build IssuingService.slnx --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test IssuingService.slnx --configuration Release --no-build
