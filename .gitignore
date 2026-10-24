@@ -3,6 +3,12 @@ PLAN_DE_TRABAJO.md
 GUIA_ESTUDIO.md
 *.pdf
 
+# Clips para el video de sustentación (pesados; se editan fuera del repositorio)
+videos/
+*.mp4
+*.mkv
+*.mov
+
 # Secretos
 .env
 .env.*

@@ -28,6 +28,7 @@ type Order struct {
 	VehicleYear   int
 	CityCode      string
 	Quote         *Quote
+	PaymentID     PaymentID
 	FailureReason string
 	CreatedAt     time.Time
 	UpdatedAt     time.Time

@@ -65,15 +65,16 @@ type quoteResponse struct {
 
 // orderResponse nunca incluye el documento y devuelve la placa enmascarada.
 type orderResponse struct {
-	ID            order.OrderID  `json:"id"`
-	Status        order.Status   `json:"status"`
-	Plate         string         `json:"plate"`
-	VehicleYear   int            `json:"vehicleYear"`
-	CityCode      string         `json:"cityCode"`
-	Quote         *quoteResponse `json:"quote,omitempty"`
-	FailureReason string         `json:"failureReason,omitempty"`
-	CreatedAt     time.Time      `json:"createdAt"`
-	UpdatedAt     time.Time      `json:"updatedAt"`
+	ID            order.OrderID   `json:"id"`
+	Status        order.Status    `json:"status"`
+	Plate         string          `json:"plate"`
+	VehicleYear   int             `json:"vehicleYear"`
+	CityCode      string          `json:"cityCode"`
+	Quote         *quoteResponse  `json:"quote,omitempty"`
+	PaymentID     order.PaymentID `json:"paymentId,omitempty"`
+	FailureReason string          `json:"failureReason,omitempty"`
+	CreatedAt     time.Time       `json:"createdAt"`
+	UpdatedAt     time.Time       `json:"updatedAt"`
 }
 
 type errorResponse struct {
@@ -160,6 +161,7 @@ func toResponse(o order.Order) orderResponse {
 		Plate:         o.Plate.String(),
 		VehicleYear:   o.VehicleYear,
 		CityCode:      o.CityCode,
+		PaymentID:     o.PaymentID,
 		FailureReason: o.FailureReason,
 		CreatedAt:     o.CreatedAt.UTC(),
 		UpdatedAt:     o.UpdatedAt.UTC(),
