@@ -41,7 +41,7 @@ func NewLogin(a Authenticator, limiter *IPRateLimiter, log *slog.Logger) *Login 
 }
 
 // Register registra la ruta.
-func (h *Login) Register(mux *http.ServeMux) {
+func (h *Login) Register(mux Router) {
 	mux.HandleFunc("POST /auth/login", h.login)
 }
 

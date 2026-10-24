@@ -34,7 +34,7 @@ func NewWebhooks(handler PaymentEventHandler, verifier *SignatureVerifier, log *
 }
 
 // Register registra la ruta en el mux.
-func (h *Webhooks) Register(mux *http.ServeMux) {
+func (h *Webhooks) Register(mux Router) {
 	mux.HandleFunc("POST /webhooks/payments", h.payments)
 }
 

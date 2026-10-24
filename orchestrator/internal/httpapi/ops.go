@@ -44,7 +44,7 @@ func NewOps(actions OperatorActionRunner, events app.EventReader, log *slog.Logg
 func (h *Ops) CloseStreams() { h.closeOnce.Do(func() { close(h.closing) }) }
 
 // Register registra las rutas protegidas con require.
-func (h *Ops) Register(mux *http.ServeMux, require func(http.HandlerFunc) http.HandlerFunc) {
+func (h *Ops) Register(mux Router, require func(http.HandlerFunc) http.HandlerFunc) {
 	mux.HandleFunc("POST /orders/{id}/actions/retry-issuance", require(h.action(OperatorActionRunner.RetryIssuance)))
 	mux.HandleFunc("POST /orders/{id}/actions/mark-for-reversal", require(h.action(OperatorActionRunner.MarkForReversal)))
 	mux.HandleFunc("GET /orders/{id}/events", require(h.listEvents))

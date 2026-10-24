@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -185,5 +186,24 @@ func TestRateLimiter_NeverExceedsMaxTrackedIPs(t *testing.T) {
 
 	if n := l.tracked(); n > maxTrackedIPs {
 		t.Fatalf("IP registradas = %d, máximo %d", n, maxTrackedIPs)
+	}
+}
+
+// Barrido del login: ni la contraseña (aunque sea la equivocada) ni el token emitido llegan a los logs.
+func TestLogin_NeverLogsPasswordsOrTokens(t *testing.T) {
+	var logs bytes.Buffer
+	mux := http.NewServeMux()
+	NewLogin(operators, NewIPRateLimiter(5), slog.New(slog.NewJSONHandler(&logs, nil))).Register(mux)
+
+	postLogin(mux, "10.0.0.1", `{"username":"ana.perez","password":"clave-equivocada-secreta"}`)
+	ok := postLogin(mux, "10.0.0.1", `{"username":"ana.perez","password":"clave"}`)
+
+	for _, secret := range []string{"clave-equivocada-secreta", `"clave"`, "token-ana.perez"} {
+		if strings.Contains(logs.String(), secret) {
+			t.Errorf("%q aparece en los logs: %s", secret, logs.String())
+		}
+	}
+	if ok.Code != http.StatusOK || logs.Len() == 0 {
+		t.Fatalf("status=%d; el login fallido debía dejar un WARN", ok.Code)
 	}
 }

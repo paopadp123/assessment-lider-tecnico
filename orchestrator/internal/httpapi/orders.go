@@ -44,7 +44,7 @@ func NewOrders(creator OrderCreator, reader OrderReader, log *slog.Logger) *Orde
 }
 
 // Register registra las rutas en el mux.
-func (h *Orders) Register(mux *http.ServeMux) {
+func (h *Orders) Register(mux Router) {
 	mux.HandleFunc("POST /orders", h.create)
 	mux.HandleFunc("GET /orders/{id}", h.get)
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/order"
+	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/trace"
 )
 
 type storedPaymentEvent struct {
@@ -194,7 +195,7 @@ func (r *fakeRepo) RecordPaymentEvent(ctx context.Context, ev PaymentEvent, appl
 		r.rollbackLocked(snap) // ni el evento ni el cambio de estado quedan, igual que en Postgres
 		return PaymentEventResult{}, err
 	}
-	return PaymentEventResult{Outcome: outcome, OrderID: id}, nil
+	return PaymentEventResult{Outcome: outcome, OrderID: id, CorrelationID: r.orders[id].CorrelationID}, nil
 }
 
 // applyLocked replica al repositorio real: un conflicto de dominio es anomalía; cualquier otro error
@@ -228,14 +229,16 @@ func (r *fakeRepo) Get(_ context.Context, id order.OrderID) (order.Order, error)
 
 // fakeQuoter devuelve, en orden, los errores configurados y después una cotización válida.
 type fakeQuoter struct {
-	errs    []error
-	calls   int
-	ctxErrs []error // estado del contexto en el momento de cada llamada
+	errs         []error
+	calls        int
+	ctxErrs      []error  // estado del contexto en el momento de cada llamada
+	correlations []string // correlation-id recibido en cada llamada
 }
 
 func (q *fakeQuoter) Quote(ctx context.Context, _ QuoteRequest) (order.Quote, error) {
 	q.calls++
 	q.ctxErrs = append(q.ctxErrs, ctx.Err())
+	q.correlations = append(q.correlations, trace.ID(ctx))
 	if q.calls <= len(q.errs) {
 		return order.Quote{}, q.errs[q.calls-1]
 	}
@@ -245,13 +248,15 @@ func (q *fakeQuoter) Quote(ctx context.Context, _ QuoteRequest) (order.Quote, er
 // fakePSP devuelve, en orden, los errores configurados y después el paymentId "pay-1".
 // Como un PSP real con Idempotency-Key, la misma orden recibe siempre el mismo paymentId.
 type fakePSP struct {
-	errs  []error
-	calls int
-	got   []PaymentRequest
+	errs         []error
+	calls        int
+	got          []PaymentRequest
+	correlations []string
 }
 
-func (p *fakePSP) CreatePayment(_ context.Context, req PaymentRequest) (order.PaymentID, error) {
+func (p *fakePSP) CreatePayment(ctx context.Context, req PaymentRequest) (order.PaymentID, error) {
 	p.calls++
+	p.correlations = append(p.correlations, trace.ID(ctx))
 	p.got = append(p.got, req)
 	if p.calls <= len(p.errs) {
 		return "", p.errs[p.calls-1]
@@ -313,17 +318,19 @@ type fakeIssuer struct {
 	emissions       int // pólizas distintas creadas: más de una por orden sería una doble emisión
 	got             []IssueRequest
 	onIssue         func() // se ejecuta al recibir la emisión; permite simular cambios concurrentes
+	correlations    []string
 }
 
 func newFakeIssuer() *fakeIssuer {
 	return &fakeIssuer{policies: map[order.OrderID]order.PolicyNumber{}}
 }
 
-func (f *fakeIssuer) Issue(_ context.Context, req IssueRequest) (order.PolicyNumber, error) {
+func (f *fakeIssuer) Issue(ctx context.Context, req IssueRequest) (order.PolicyNumber, error) {
 	if f.onIssue != nil {
 		f.onIssue()
 	}
 	f.mu.Lock()
+	f.correlations = append(f.correlations, trace.ID(ctx))
 	defer f.mu.Unlock()
 	f.issueCalls++
 	f.got = append(f.got, req)
