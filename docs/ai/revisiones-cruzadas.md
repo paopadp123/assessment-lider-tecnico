@@ -114,4 +114,16 @@ _Antigravity: entra en la revisión A al cerrar HU-05._
 
 **Lectura.** El hallazgo bloqueante es del mismo tipo que el de HU-04: una suposición que parece obvia (los IDs ordenan los commits) y que solo falla con concurrencia real. El QA acertó el problema y propuso una solución con un defecto propio; la decisión final requirió criterio humano o del modelo principal. Lección para la política de IA: el revisor detecta, pero su arreglo también se revisa.
 
-_Antigravity: revisión A (HU-03 a HU-05) al cerrar esta HU._
+## Revisión A de Antigravity (HU-03 a HU-05, diff acumulado de Go)
+
+**Cómo se hizo.** Una sola pasada sobre unas 2.400 líneas de código de producción (sin pruebas ni documentos), con 5 preguntas de riesgo concretas, la lista de decisiones ya aceptadas para no repetirlas y un máximo de 5 hallazgos. Reemplazó a tres revisiones por HU para ahorrar tokens (estrategia en la sección 9.2 del plan).
+
+| Pregunta / hallazgo | Veredicto | Acción |
+|---|---|---|
+| Doble emisión, orden pagada perdida, concurrencia SQL | Sin hallazgo, con argumento correcto en las tres | — |
+| Comandos duplicados si la base falla después de que el broker confirmó (y en el `ack` del worker) | Real pero **ya aceptado** (entrega "al menos una vez", ADR 0002; lo absorben la idempotencia por estado y el control optimista). Una parte del escenario es inexacta: una falla al publicar un mensaje no deshace el lote; solo un error de la base lo hace | Sin cambio |
+| El limitador de login crece sin tope si todas las IP están activas (ataque distribuido): la poda no libera nada | **Válido.** Lo introdujo Claude al corregir el hallazgo del QA sobre el mismo limitador: arregló un problema y abrió otro | Si la poda no libera espacio, se descarta la IP más antigua. Prueba nueva en rojo primero, validada con una mutación (descartar la más reciente la hace fallar) |
+
+**Efecto lateral.** Al corregirlo apareció una prueba intermitente que Claude escribió en HU-04: el breaker de prueba quedaba abierto solo 100 ms, y una pausa de la máquina durante la suite completa lo pasaba a half-open. Las pruebas que no son de half-open ahora lo dejan abierto una hora; 4 corridas completas seguidas en verde.
+
+**Lectura.** Con preguntas acotadas y las decisiones aceptadas listadas, Antigravity no repitió hallazgos conocidos (en HU-02 aportó 1 cambio de 12) y su único hallazgo nuevo fue válido. Que el defecto viniera de la corrección de otro revisor es el punto para la política de IA: cada arreglo sugerido por una IA vuelve a pasar por revisión, y una revisión por bloque al final atrapa lo que dejaron las revisiones por HU.
