@@ -16,8 +16,25 @@ const (
 	RefundRequired Status = "REFUND_REQUIRED"
 )
 
+// transitions es la única fuente de verdad del flujo. Una vez pagada, la orden nunca pasa a FAILED:
+// si la emisión no se logra, queda en REFUND_REQUIRED para que operaciones decida el reverso.
+var transitions = map[Status][]Status{
+	Created:        {Quoted, Failed},
+	Quoted:         {PaymentPending, Failed},
+	PaymentPending: {Paid, Failed},
+	Paid:           {Issuing, RefundRequired},
+	Issuing:        {Issued, RefundRequired},
+}
+
 // CanTransitionTo indica si el flujo permite pasar de s a next.
-func (s Status) CanTransitionTo(next Status) bool { return false }
+func (s Status) CanTransitionTo(next Status) bool {
+	for _, allowed := range transitions[s] {
+		if allowed == next {
+			return true
+		}
+	}
+	return false
+}
 
 // IsTerminal indica si la orden ya no admite cambios de estado.
-func (s Status) IsTerminal() bool { return false }
+func (s Status) IsTerminal() bool { return len(transitions[s]) == 0 }
