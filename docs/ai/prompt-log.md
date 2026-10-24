@@ -166,3 +166,66 @@ Formato de salida: 1) plan y espera OK; 2) código + pruebas rojo → verde; 3) 
 
 **Qué se agregó y por qué:** el original solo confirmaba la decisión de RabbitMQ. Se agregaron el alcance concreto (solo el pago pasa a asíncrono, decisión aprobada por el usuario tras explicarle el impacto en el comprador), cómo se cierra el hallazgo del cobro huérfano de HU-02, la topología de reintentos y DLQ, las pruebas de integración en CI y la lista de conceptos de colas pedida para estudiar.
 **Resultado:** HU-03 terminada: 7 paquetes en verde, integración real contra PostgreSQL y RabbitMQ, prueba de humo con recuperación (PAID tras 2 fallas del PSP) y DLQ (FAILED tras 4 intentos). Ajuste aprobado durante la ejecución: idempotencia por estado en lugar de tabla de mensajes procesados. Errores de la IA detectados por la propia IA antes de cualquier revisor: (1) una prueba de atomicidad de la outbox era un falso positivo (la falla ocurría antes del insert que debía probar); (2) la prueba de reintento no medía la espera (aserción `> 0` con jitter); (3) a esta misma entrada le había puesto una hora inventada (01:40) en vez de la real (01:07), corregida con el registro automático del hook; (4) el hook registraba los informes del agente QA como prompts del usuario. Las pruebas de concurrencia se validaron quitando el lock a propósito.
+
+## 2026-10-24 09:23 — [HU-04] Emisión de la póliza con circuit breaker
+**Herramienta:** Claude Code (skill /prompt)
+
+**Original (tal como se escribió):**
+> arranca el 04 /prompt
+
+**Ajuste del usuario al revisar el refinado:**
+> toca estudiar que es el acl si el breaker abierto no cuenta como intento si que queden encoladas
+
+**Refinado (ejecutado):**
+```text
+[HU-04] Emisión de la póliza con circuit breaker (issue #5)
+
+Contexto:
+- Rama feature/hu-04 desde dev (HU-01..03 mergeadas).
+- Hoy la orden llega a PAID dentro de RecordPaymentEvent / MarkPaymentPending (repo, bajo lock por
+  pago), con applyPayment. La outbox solo acepta 'request_payment' (CHECK en 003_outbox.sql), y el
+  worker de RabbitMQ solo procesa ese comando.
+- Enunciado: circuit breaker hacia el emisor; si está caído, la compra no se pierde (queda encolada y
+  observable). El emisor real tiene errores en HTTP 200 y "timeout tras 8 s habiendo emitido";
+  consulta obligatoria por externalRef = orderId antes de reintentar. Pago aprobado + emisión fallida
+  en definitiva → REFUND_REQUIRED, sin reembolso automático.
+- El orquestador habla con la ACL en C# (HU-07, aún no existe), no con el emisor legado. El contrato
+  limpio que se define aquí es el que HU-07 debe implementar.
+
+Objetivo: al quedar PAID se publica issue_policy por la outbox en la misma transacción, y un worker
+emite a través de la ACL, protegido por un circuit breaker, hasta ISSUED o REFUND_REQUIRED, sin
+emitir dos veces.
+
+Restricciones:
+- Go, misma arquitectura (order / app / adapters / httpapi). Breaker con sony/gobreaker (v2).
+- Migración NUEVA 004: 'issue_policy' en el CHECK de la outbox + columna policy_number.
+- Contrato hacia la ACL (puerto PolicyIssuer + adaptador HTTP):
+    POST /policies {externalRef, ...} → 201/200 {policyNumber}; 422 = rechazo de negocio definitivo;
+    5xx/timeout = transitorio. GET /policies?externalRef={orderId} → 200 {policyNumber} | 404.
+- El breaker cuenta solo fallas transitorias, no rechazos de negocio. Placa y documento nunca en claro.
+- Rojo → verde real. Explicar Go en 3–4 líneas y actualizar GUIA_ESTUDIO.md (incluida la ACL).
+
+Criterios de aceptación:
+1. PAID (por webhook o por eventos pendientes) ⇒ issue_policy en la outbox en la misma transacción.
+2. Worker idempotente por estado: PAID → ISSUING y llama; ISSUING (reentrega) → GET por externalRef
+   primero; ISSUED / REFUND_REQUIRED → sin efecto.
+3. Éxito → ISSUED con policyNumber y evento en la línea de tiempo.
+4. 422 → REFUND_REQUIRED con motivo, sin reintento.
+5. Timeout / 5xx → reintento con backoff; el siguiente intento consulta antes de reemitir
+   ("timeout pero sí emitió" ⇒ ISSUED con una sola emisión).
+6. Breaker abierto → no llama a la ACL; la orden sigue en ISSUING, el mensaje se reprograma SIN
+   consumir intentos (decisión del usuario: las órdenes quedan encoladas) y queda observable.
+7. Reintentos transitorios agotados → DLQ y la orden queda en ISSUING (un timeout no prueba que no se
+   emitió); la decide la reconciliación de HU-05.
+8. Pruebas de dominio, caso de uso con fakes fieles al repo real, breaker, adaptador HTTP con
+   httptest e integración con Postgres/RabbitMQ.
+
+Fuera de alcance: ACL C# (HU-07), simulador (HU-08), reconciliación y acciones operativas (HU-05),
+correlation-id y OpenAPI (HU-06), compose punta a punta (HU-10).
+
+Formato de salida: plan corto; código + pruebas en verde; explicación de Go; ADR 0003; QA con
+qa-reviewer. Sin Antigravity (revisión A al cerrar HU-05). Sin commit ni push hasta el OK.
+```
+
+**Qué se agregó y por qué:** el original era solo "arranca el 04". Se agregaron los requisitos del enunciado (consulta por externalRef antes de reintentar, errores en 200, REFUND_REQUIRED), el contrato limpio hacia la ACL (HU-07 aún no existe), y la regla de que los reintentos agotados no prueban una falla definitiva. El usuario resolvió la pregunta abierta: el breaker abierto no consume intentos.
+**Resultado:** HU-04 terminada: 8 paquetes en verde con integración real (PostgreSQL y RabbitMQ) y el orquestador arrancando con las colas nuevas. La regla "un timeout no autoriza a reemitir" se validó quitando la consulta a propósito (3 pruebas fallaron). Errores de la IA: (1) mapeó cualquier 4xx de la ACL a rechazo de negocio, copiando el criterio del PSP: habría dejado órdenes pagadas en REFUND_REQUIRED por un error de configuración; lo detectó el agente QA (Haiku). (2) Omitió el criterio "estado del breaker expuesto" del issue #5; lo detectó la propia IA al releer el issue antes de cerrar. (3) Dos pruebas propias mal escritas (un servidor de prueba que se colgaba y una suposición falsa sobre gobreaker), detectadas al ejecutarlas.
