@@ -128,8 +128,11 @@ func isTransient(unavailable error) func(error) bool {
 // Una orden que queda PAID dispara la emisión de la póliza; un rechazo no dispara nada.
 func applyPayment(now func() time.Time) ApplyPaymentFunc {
 	return func(o *order.Order, ev PaymentEvent) (order.Event, []Command, error) {
-		ev2, err := o.ApplyPayment(ev.Status, now())
-		return ev2, nil, err
+		applied, err := o.ApplyPayment(ev.Status, now())
+		if err != nil || o.Status != order.Paid {
+			return applied, nil, err
+		}
+		return applied, []Command{{Type: CommandIssuePolicy, OrderID: o.ID}}, nil
 	}
 }
 
