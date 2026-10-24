@@ -1,0 +1,39 @@
+# Documentos internos (el enunciado es confidencial)
+PLAN_DE_TRABAJO.md
+GUIA_ESTUDIO.md
+*.pdf
+
+# Secretos
+.env
+.env.*
+!.env.example
+
+# Go
+orchestrator/bin/
+*.exe
+*.test
+coverage.out
+
+# .NET
+bin/
+obj/
+TestResults/
+*.user
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+next-env.d.ts
+
+# Editores / SO
+.vs/
+.idea/
+.vscode/*
+!.vscode/extensions.json
+Thumbs.db
+.DS_Store
+
+# Claude Code: configuración local de cada máquina
+.claude/settings.local.json
