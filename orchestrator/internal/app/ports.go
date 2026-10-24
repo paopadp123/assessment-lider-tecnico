@@ -23,6 +23,15 @@ var (
 	ErrIdempotencyConflict = errors.New("idempotency key reused with a different request")
 	// ErrOrderNotFound indica que la orden no existe.
 	ErrOrderNotFound = errors.New("order not found")
+	// ErrIssuerUnavailable indica una falla transitoria de la capa de emisión (5xx, timeout, respuesta inválida).
+	// Un timeout no prueba que la póliza no se emitió: antes de reemitir se consulta por externalRef.
+	ErrIssuerUnavailable = errors.New("policy issuer unavailable")
+	// ErrIssueRejected indica que la emisión fue rechazada por una regla de negocio: reintentar no cambia el resultado.
+	ErrIssueRejected = errors.New("policy issue rejected")
+	// ErrIssuerCircuitOpen indica que el circuit breaker está abierto: no se llamó a la capa de emisión.
+	ErrIssuerCircuitOpen = errors.New("policy issuer circuit open")
+	// ErrPolicyNotFound indica que no hay póliza emitida para la referencia externa consultada.
+	ErrPolicyNotFound = errors.New("policy not found")
 )
 
 // QuoteRequest son los datos que exige el cotizador de la aseguradora.
@@ -49,6 +58,29 @@ type PaymentRequest struct {
 // PaymentGateway es el puerto hacia la pasarela de pagos (PSP).
 type PaymentGateway interface {
 	CreatePayment(ctx context.Context, req PaymentRequest) (order.PaymentID, error)
+}
+
+// IssueRequest es la solicitud de emisión que recibe la capa de emisión (ACL en C#).
+// ExternalRef = orderId: es la clave de idempotencia y la referencia para consultar si ya se emitió.
+type IssueRequest struct {
+	ExternalRef order.OrderID
+	QuoteID     string
+	Premium     string
+	Currency    string
+	Plate       order.Plate
+	DocumentID  order.DocumentID
+	VehicleYear int
+	CityCode    string
+}
+
+// PolicyIssuer es el puerto hacia la capa de emisión. Habla con la ACL, nunca con el emisor legado:
+// la ACL traduce su contrato y convierte los errores escondidos en respuestas 200 en errores explícitos.
+type PolicyIssuer interface {
+	// Issue emite la póliza. Devuelve ErrIssueRejected (definitivo), ErrIssuerUnavailable (transitorio)
+	// o ErrIssuerCircuitOpen (no se intentó).
+	Issue(ctx context.Context, req IssueRequest) (order.PolicyNumber, error)
+	// FindByExternalRef consulta si la póliza ya se emitió. Devuelve ErrPolicyNotFound si no existe.
+	FindByExternalRef(ctx context.Context, ref order.OrderID) (order.PolicyNumber, error)
 }
 
 // PaymentEvent es un resultado de pago recibido por webhook, ya con la firma verificada.
@@ -78,15 +110,20 @@ type PaymentEventResult struct {
 	OrderID order.OrderID // vacío si la orden aún no se conoce
 }
 
-// ApplyPaymentFunc decide el cambio de estado de una orden ante un evento de pago.
+// ApplyPaymentFunc decide el cambio de estado de una orden ante un evento de pago y los comandos que ese
+// cambio dispara (p. ej. emitir la póliza al quedar PAID). El repositorio guarda los tres en la misma transacción.
 // Devuelve order.ErrPaymentConflict si el evento no corresponde al estado de la orden.
-type ApplyPaymentFunc func(o *order.Order, ev PaymentEvent) (order.Event, error)
+type ApplyPaymentFunc func(o *order.Order, ev PaymentEvent) (order.Event, []Command, error)
 
 // CommandType identifica una tarea asíncrona que se publica por la outbox.
 type CommandType string
 
-// CommandRequestPayment pide la intención de pago de una orden cotizada.
-const CommandRequestPayment CommandType = "request_payment"
+const (
+	// CommandRequestPayment pide la intención de pago de una orden cotizada.
+	CommandRequestPayment CommandType = "request_payment"
+	// CommandIssuePolicy pide la emisión de la póliza de una orden pagada.
+	CommandIssuePolicy CommandType = "issue_policy"
+)
 
 // Command es una tarea que debe ejecutarse después de un cambio de estado. Se guarda en la outbox
 // en la misma transacción que ese cambio: o quedan los dos o ninguno.

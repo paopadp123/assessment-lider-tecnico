@@ -20,12 +20,16 @@ const (
 	CommandRetry CommandOutcome = "RETRY"
 	// CommandDeadLetter: agotó los reintentos o no se puede procesar; va a la DLQ.
 	CommandDeadLetter CommandOutcome = "DEAD_LETTER"
+	// CommandDeferred: el tercero no está disponible (circuit breaker abierto) y no se intentó; se reprograma
+	// tras Delay sin consumir un intento, para que una caída larga no mande las órdenes a la DLQ.
+	CommandDeferred CommandOutcome = "DEFERRED"
 )
 
 // CommandResult es el resultado de procesar un comando, con el motivo para logs y headers.
 type CommandResult struct {
 	Outcome CommandOutcome
 	Reason  string
+	Delay   time.Duration // solo para CommandDeferred
 }
 
 // Delivery es un comando recibido del broker.

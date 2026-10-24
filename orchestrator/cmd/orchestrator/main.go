@@ -98,7 +98,7 @@ func run(logger *slog.Logger) error {
 	handlePayment := app.NewHandlePaymentWebhook(repo, logger)
 	requestPayment := app.NewRequestPayment(repo, repo, pspClient, logger)
 	dispatcher := app.NewDispatcher(repo, publisher, logger)
-	worker := rabbitmq.NewWorker(conn, topo, requestPayment, logger, time.Second)
+	worker := rabbitmq.NewWorker(conn, topo, app.CommandRequestPayment, requestPayment, logger, time.Second)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", httpapi.Health)

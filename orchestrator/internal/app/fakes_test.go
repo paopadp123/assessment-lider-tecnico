@@ -97,11 +97,12 @@ type fakeSnapshot struct {
 	orders    map[order.OrderID]order.Order
 	byPayment map[order.PaymentID]order.OrderID
 	events    int
+	commands  int
 	payEvents []storedPaymentEvent
 }
 
 func (r *fakeRepo) snapshotLocked() fakeSnapshot {
-	s := fakeSnapshot{orders: map[order.OrderID]order.Order{}, byPayment: map[order.PaymentID]order.OrderID{}, events: len(r.events)}
+	s := fakeSnapshot{orders: map[order.OrderID]order.Order{}, byPayment: map[order.PaymentID]order.OrderID{}, events: len(r.events), commands: len(r.commands)}
 	for k, v := range r.orders {
 		s.orders[k] = v
 	}
@@ -115,7 +116,7 @@ func (r *fakeRepo) snapshotLocked() fakeSnapshot {
 }
 
 func (r *fakeRepo) rollbackLocked(s fakeSnapshot) {
-	r.orders, r.byPayment, r.events = s.orders, s.byPayment, r.events[:s.events]
+	r.orders, r.byPayment, r.events, r.commands = s.orders, s.byPayment, r.events[:s.events], r.commands[:s.commands]
 	r.payEvents = r.payEvents[:0]
 	for i := range s.payEvents {
 		p := s.payEvents[i]
@@ -195,7 +196,7 @@ func (r *fakeRepo) RecordPaymentEvent(ctx context.Context, ev PaymentEvent, appl
 // se propaga sin cambiar la orden (en Postgres, la transacción hace rollback).
 func (r *fakeRepo) applyLocked(id order.OrderID, s *storedPaymentEvent, apply ApplyPaymentFunc) (PaymentOutcome, error) {
 	cur := r.orders[id]
-	e, err := apply(&cur, s.ev)
+	e, cmds, err := apply(&cur, s.ev)
 	switch {
 	case errors.Is(err, order.ErrPaymentConflict):
 		s.applied, s.outcome = true, PaymentAnomaly
@@ -205,6 +206,7 @@ func (r *fakeRepo) applyLocked(id order.OrderID, s *storedPaymentEvent, apply Ap
 	}
 	r.orders[id] = cur
 	r.events = append(r.events, e)
+	r.commands = append(r.commands, cmds...)
 	s.applied, s.outcome = true, PaymentApplied
 	return PaymentApplied, nil
 }
@@ -290,4 +292,61 @@ func (p *fakePublisher) Publish(_ context.Context, m OutboxMessage) error {
 	}
 	p.sent = append(p.sent, m.MessageID)
 	return nil
+}
+
+// fakeIssuer se comporta como la ACL: idempotente por externalRef (emitir dos veces la misma orden
+// devuelve la misma póliza) y consultable. issueErrs se devuelven en orden antes de emitir; si
+// issuedOnTimeout está activo, un timeout deja la póliza emitida igual ("timeout pero sí emitió").
+type fakeIssuer struct {
+	mu              sync.Mutex
+	issueErrs       []error
+	findErrs        []error
+	issuedOnTimeout bool
+	policies        map[order.OrderID]order.PolicyNumber
+	issueCalls      int
+	findCalls       int
+	emissions       int // pólizas distintas creadas: más de una por orden sería una doble emisión
+	got             []IssueRequest
+}
+
+func newFakeIssuer() *fakeIssuer {
+	return &fakeIssuer{policies: map[order.OrderID]order.PolicyNumber{}}
+}
+
+func (f *fakeIssuer) Issue(_ context.Context, req IssueRequest) (order.PolicyNumber, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.issueCalls++
+	f.got = append(f.got, req)
+	if f.issueCalls <= len(f.issueErrs) {
+		err := f.issueErrs[f.issueCalls-1]
+		if f.issuedOnTimeout && errors.Is(err, context.DeadlineExceeded) {
+			f.emitLocked(req.ExternalRef)
+		}
+		return "", err
+	}
+	return f.emitLocked(req.ExternalRef), nil
+}
+
+func (f *fakeIssuer) emitLocked(ref order.OrderID) order.PolicyNumber {
+	if n, ok := f.policies[ref]; ok {
+		return n
+	}
+	f.emissions++
+	n := order.PolicyNumber(fmt.Sprintf("POL-%d", f.emissions))
+	f.policies[ref] = n
+	return n
+}
+
+func (f *fakeIssuer) FindByExternalRef(_ context.Context, ref order.OrderID) (order.PolicyNumber, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.findCalls++
+	if f.findCalls <= len(f.findErrs) {
+		return "", f.findErrs[f.findCalls-1]
+	}
+	if n, ok := f.policies[ref]; ok {
+		return n, nil
+	}
+	return "", ErrPolicyNotFound
 }

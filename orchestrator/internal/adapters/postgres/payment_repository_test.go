@@ -13,8 +13,9 @@ import (
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/order"
 )
 
-func applyDomain(o *order.Order, ev app.PaymentEvent) (order.Event, error) {
-	return o.ApplyPayment(ev.Status, time.Now())
+func applyDomain(o *order.Order, ev app.PaymentEvent) (order.Event, []app.Command, error) {
+	e, err := o.ApplyPayment(ev.Status, time.Now())
+	return e, nil, err
 }
 
 // quotedOrder deja en la base una orden cotizada lista para pedir el pago.
