@@ -72,4 +72,23 @@ Cada HU la escribe Claude Code (Opus) y la revisan dos IA distintas antes del me
 
 **Lectura.** El QA repitió por segunda vez la confusión entre la regla del emisor y el PSP: una regla correcta aplicada al tercero equivocado. Y por tercera HU seguida apareció un fake más permisivo que el sistema real. Lección para la política de IA del equipo: los dobles de prueba escritos por la IA deben revisarse contra el comportamiento del sistema real, no solo contra la interfaz.
 
-_Pendiente: revisión de Antigravity sobre el PR #25._
+_Antigravity: diferida a la revisión A (diff acumulado de HU-03 a HU-05). Desde HU-03, la IA externa se usa por riesgo y por bloque, no en cada HU, porque sus tokens son limitados._
+
+## HU-04 — Emisión de la póliza con circuit breaker
+
+| Hallazgo | Lo encontró | Veredicto | Acción |
+|---|---|---|---|
+| El cliente de la ACL trataba cualquier 4xx como rechazo de negocio: un 400/401/404 por configuración o por un bug propio dejaba órdenes **pagadas** en REFUND_REQUIRED | QA (Haiku) | **Válido, bloqueante.** Error de Claude: copió el criterio del cliente del PSP sin pensar en la consecuencia distinta (en el PSP no hay dinero cobrado todavía) | Solo 422 es rechazo; el resto de 4xx es transitorio (reintento → DLQ, orden en ISSUING). La prueba que fijaba el comportamiento equivocado se corrigió primero (rojo) |
+| Un comando de emisión para una orden no pagada terminaba en silencio (log INFO) | QA (Haiku) | Válido, no bloqueante | WARN, con prueba |
+| Dos entregas simultáneas en ISSUING pueden llamar dos veces a la ACL | QA (Haiku) | Conocido y documentado en el ADR 0003 | Lo cierra la idempotencia por `externalRef` de la ACL (HU-07) |
+| Breaker en memoria por réplica | QA (Haiku) | Conocido y documentado en el ADR 0003 | Sin cambio |
+
+**Verificaciones propias antes de cualquier revisor:**
+- Se quitó a propósito la consulta por `externalRef` antes de reemitir: fallaron 3 pruebas (2 emisiones en lugar de 1). Con la consulta, verde.
+- Claude omitió un criterio del issue #5 ("estado del breaker expuesto para operación") y lo detectó al releer el issue antes de proponer commits: se agregó `GET /ops/breakers`.
+- Dos pruebas propias mal escritas, detectadas al ejecutarlas: un servidor de prueba que dejaba colgado `srv.Close()` y una aserción que suponía que gobreaker conserva los contadores al abrir el circuito (los reinicia).
+- Riesgo de diseño detectado antes de implementar: los aplazamientos de 30 s en la cola de reintento corto bloquearían a los reintentos de ~1 s (RabbitMQ solo vence el mensaje al frente). Se creó una cola `.deferred` por comando.
+
+**Lectura.** El QA vuelve a aportar el hallazgo más caro, y otra vez por un patrón copiado de un tercero a otro (en HU-02 y HU-03 fue al revés: el QA aplicó al PSP una regla del emisor). La lección para la política de IA: una regla de mapeo de errores se decide por la consecuencia de negocio de cada tercero, no se reutiliza por parecido.
+
+_Antigravity: entra en la revisión A al cerrar HU-05._
