@@ -11,6 +11,7 @@ import (
 
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/app"
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/order"
+	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/trace"
 )
 
 const maxBodyBytes = 16 << 10
@@ -126,8 +127,10 @@ func (h *Orders) create(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		h.internalError(w, r, err)
 	case res.Created:
+		setCorrelation(w, res.Order)
 		writeJSON(w, http.StatusCreated, toResponse(res.Order))
 	default:
+		setCorrelation(w, res.Order)
 		writeJSON(w, http.StatusOK, toResponse(res.Order))
 	}
 }
@@ -151,7 +154,7 @@ func (h *Orders) get(w http.ResponseWriter, r *http.Request) {
 
 // internalError registra el detalle y responde un mensaje genérico: los errores internos no se filtran al cliente.
 func (h *Orders) internalError(w http.ResponseWriter, r *http.Request, err error) {
-	h.log.ErrorContext(r.Context(), "request failed", "method", r.Method, "path", r.URL.Path, "error", err)
+	trace.Logger(r.Context(), h.log).Error("request failed", "method", r.Method, "path", r.URL.Path, "error", err)
 	writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal error"})
 }
 
@@ -183,4 +186,12 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body) // si el cliente ya se fue, no hay a quién reportarle el error
+}
+
+// setCorrelation responde con el correlation-id de la compra. Al repetir una solicitud (misma
+// Idempotency-Key) es el de la compra original, no el de la repetición: con él se encuentra todo su recorrido.
+func setCorrelation(w http.ResponseWriter, o order.Order) {
+	if o.CorrelationID != "" {
+		w.Header().Set(trace.Header, o.CorrelationID)
+	}
 }

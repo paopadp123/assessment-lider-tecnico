@@ -16,6 +16,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/auth"
+	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/trace"
 )
 
 // Authenticator verifica credenciales y emite un token.
@@ -71,10 +72,10 @@ func (h *Login) login(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(err, auth.ErrInvalidCredentials):
 		// Sin el usuario en el log: un intento fallido puede traer la contraseña escrita en el campo equivocado.
-		h.log.WarnContext(r.Context(), "operator login failed", "ip", clientIP(r))
+		trace.Logger(r.Context(), h.log).Warn("operator login failed", "ip", clientIP(r))
 		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "invalid credentials"})
 	case err != nil:
-		h.log.ErrorContext(r.Context(), "login failed", "error", err)
+		trace.Logger(r.Context(), h.log).Error("login failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal error"})
 	default:
 		writeJSON(w, http.StatusOK, loginResponse{Token: tok.Value, ExpiresAt: tok.ExpiresAt})

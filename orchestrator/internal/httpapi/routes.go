@@ -3,6 +3,10 @@ package httpapi
 import (
 	"context"
 	"net/http"
+	"time"
+
+	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/api"
+	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/trace"
 )
 
 // Router lo cumple *http.ServeMux. Permite registrar las rutas en un recolector durante las pruebas.
@@ -21,9 +25,13 @@ type Handlers struct {
 	Require  func(http.HandlerFunc) http.HandlerFunc
 }
 
-// Routes registra todas las rutas. Lo usan main y la prueba que verifica que cada ruta esté en el contrato.
+// Routes registra todas las rutas. Lo usan main y la prueba que verifica que cada ruta esté en el contrato:
+// una ruta nueva que no se documente hace fallar esa prueba.
 func Routes(r Router, h Handlers) {
-	r.HandleFunc("GET /health", Health)
+	r.HandleFunc("GET /health", Health) // alias de /health/live, para quien ya lo usa
+	r.HandleFunc("GET /health/live", Health)
+	r.HandleFunc("GET /health/ready", h.Ready)
+	r.HandleFunc("GET /openapi.yaml", OpenAPI)
 	r.HandleFunc("GET /ops/breakers", h.Require(h.Breakers))
 	h.Orders.Register(r)
 	h.Webhooks.Register(r)
@@ -31,8 +39,19 @@ func Routes(r Router, h Handlers) {
 	h.Ops.Register(r, h.Require)
 }
 
-// WithCorrelation asegura que cada solicitud tenga un correlation-id.
-func WithCorrelation(next http.Handler) http.Handler { return next }
+// WithCorrelation asegura que cada solicitud tenga un correlation-id: usa el del cliente si es válido o
+// genera uno, lo deja en el contexto y lo devuelve en la respuesta. Un valor inválido se reemplaza (no se
+// propaga a los logs).
+func WithCorrelation(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := r.Header.Get(trace.Header)
+		if !trace.Valid(id) {
+			id = trace.New()
+		}
+		w.Header().Set(trace.Header, id)
+		next.ServeHTTP(w, r.WithContext(trace.WithID(r.Context(), id)))
+	})
+}
 
 // Check verifica una dependencia para el readiness.
 type Check struct {
@@ -40,10 +59,40 @@ type Check struct {
 	Probe func(ctx context.Context) error
 }
 
-// Ready responde si el orquestador está listo para recibir tráfico.
-func Ready(checks ...Check) http.HandlerFunc {
-	return func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }
+type readyResponse struct {
+	Status string            `json:"status"`
+	Checks map[string]string `json:"checks"`
 }
 
-// OpenAPI sirve el contrato.
-func OpenAPI(w http.ResponseWriter, _ *http.Request) {}
+// readyTimeout acota cada verificación: un readiness que se cuelga es peor que uno que responde 503.
+const readyTimeout = 2 * time.Second
+
+// Ready responde 200 si todas las dependencias responden y 503 si alguna falla, con el nombre de la que falló.
+// El detalle del error no se expone (podría revelar direcciones internas); queda en el log de cada componente.
+// Live solo dice que el proceso vive; Ready decide si el balanceador le envía tráfico.
+func Ready(checks ...Check) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		resp := readyResponse{Status: "ready", Checks: map[string]string{}}
+		for _, c := range checks {
+			ctx, cancel := context.WithTimeout(r.Context(), readyTimeout)
+			err := c.Probe(ctx)
+			cancel()
+			if err != nil {
+				resp.Status, resp.Checks[c.Name] = "not_ready", "down"
+				continue
+			}
+			resp.Checks[c.Name] = "up"
+		}
+		status := http.StatusOK
+		if resp.Status != "ready" {
+			status = http.StatusServiceUnavailable
+		}
+		writeJSON(w, status, resp)
+	}
+}
+
+// OpenAPI sirve el contrato. La consola genera sus tipos TypeScript desde aquí.
+func OpenAPI(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/yaml")
+	_, _ = w.Write(api.Spec)
+}

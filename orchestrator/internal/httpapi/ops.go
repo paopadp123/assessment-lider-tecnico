@@ -13,6 +13,7 @@ import (
 
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/app"
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/order"
+	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/trace"
 )
 
 // OperatorActionRunner ejecuta las acciones operativas.
@@ -158,7 +159,7 @@ func (h *Ops) stream(w http.ResponseWriter, r *http.Request) {
 			events, err := h.events.EventsAfter(ctx, cursor.last, 100)
 			if err != nil {
 				if ctx.Err() == nil {
-					h.log.ErrorContext(ctx, "read events for stream", "error", err)
+					trace.Logger(ctx, h.log).Error("read events for stream", "error", err)
 				}
 				continue
 			}
@@ -193,7 +194,7 @@ func orderIDFrom(w http.ResponseWriter, r *http.Request) (order.OrderID, bool) {
 }
 
 func (h *Ops) internalError(w http.ResponseWriter, r *http.Request, err error) {
-	h.log.ErrorContext(r.Context(), "request failed", "method", r.Method, "path", r.URL.Path, "error", err)
+	trace.Logger(r.Context(), h.log).Error("request failed", "method", r.Method, "path", r.URL.Path, "error", err)
 	writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal error"})
 }
 
