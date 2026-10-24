@@ -204,3 +204,15 @@ func TestGet_ReturnsContractWithoutSensitiveData(t *testing.T) {
 		t.Fatalf("datos sensibles en la respuesta: %s", rec.Body)
 	}
 }
+
+// Una orden emitida muestra su número de póliza.
+func TestGet_IssuedOrderIncludesPolicyNumber(t *testing.T) {
+	o := quotedOrder(t)
+	o.Status, o.PolicyNumber = order.Issued, "POL-77"
+
+	rec := do(t, newHandler(&fakeCreator{}, fakeReader{o: o}), http.MethodGet, "/orders/"+string(o.ID), "", "")
+
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"policyNumber":"POL-77"`) {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}

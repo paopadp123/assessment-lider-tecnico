@@ -29,16 +29,20 @@ type fakeRepo struct {
 	payEvents   []*storedPaymentEvent
 	commands    []Command
 	deadLetters []DeadLetter
+	reconciled  map[order.OrderID]time.Time
+	issueMisses map[order.OrderID]int
 	nextID      int
 	onCreate    func() // se ejecuta tras crear la orden; permite simular eventos durante la cotización
 }
 
 func newFakeRepo() *fakeRepo {
 	return &fakeRepo{
-		orders:    map[order.OrderID]order.Order{},
-		keys:      map[string]IdempotencyKey{},
-		byKey:     map[string]order.OrderID{},
-		byPayment: map[order.PaymentID]order.OrderID{},
+		orders:      map[order.OrderID]order.Order{},
+		keys:        map[string]IdempotencyKey{},
+		byKey:       map[string]order.OrderID{},
+		byPayment:   map[order.PaymentID]order.OrderID{},
+		reconciled:  map[order.OrderID]time.Time{},
+		issueMisses: map[order.OrderID]int{},
 	}
 }
 
@@ -80,6 +84,7 @@ func (r *fakeRepo) SaveTransition(ctx context.Context, o order.Order, ev order.E
 	r.orders[o.ID] = o
 	r.events = append(r.events, ev)
 	r.commands = append(r.commands, cmds...)
+	delete(r.issueMisses, o.ID) // como el UPDATE real: un cambio de estado reinicia las rondas fallidas
 	return nil
 }
 
@@ -307,6 +312,7 @@ type fakeIssuer struct {
 	findCalls       int
 	emissions       int // pólizas distintas creadas: más de una por orden sería una doble emisión
 	got             []IssueRequest
+	onIssue         func() // se ejecuta al recibir la emisión; permite simular cambios concurrentes
 }
 
 func newFakeIssuer() *fakeIssuer {
@@ -314,6 +320,9 @@ func newFakeIssuer() *fakeIssuer {
 }
 
 func (f *fakeIssuer) Issue(_ context.Context, req IssueRequest) (order.PolicyNumber, error) {
+	if f.onIssue != nil {
+		f.onIssue()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.issueCalls++
@@ -349,4 +358,61 @@ func (f *fakeIssuer) FindByExternalRef(_ context.Context, ref order.OrderID) (or
 		return n, nil
 	}
 	return "", ErrPolicyNotFound
+}
+
+// ClaimStuck replica la consulta real: estados no terminales, sin cambios ni reconciliación desde before.
+func (r *fakeRepo) ClaimStuck(ctx context.Context, before time.Time, limit int) ([]StuckOrder, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []StuckOrder
+	ids := make([]order.OrderID, 0, len(r.orders))
+	for id := range r.orders {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	for _, id := range ids {
+		o := r.orders[id]
+		last, seen := r.reconciled[id]
+		if o.Status.IsTerminal() || o.Status == order.RefundRequired || !o.UpdatedAt.Before(before) || (seen && !last.Before(before)) {
+			continue
+		}
+		if len(out) == limit {
+			break
+		}
+		r.reconciled[id] = before.Add(time.Nanosecond) // "ahora" es posterior al umbral
+		out = append(out, StuckOrder{Order: o, IssueMisses: r.issueMisses[id]})
+	}
+	return out, nil
+}
+
+func (r *fakeRepo) Enqueue(ctx context.Context, cmds ...Command) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.commands = append(r.commands, cmds...)
+	return nil
+}
+
+func (r *fakeRepo) RecordIssueMiss(_ context.Context, id order.OrderID) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.orders[id]; !ok {
+		return 0, ErrOrderNotFound
+	}
+	r.issueMisses[id]++
+	return r.issueMisses[id], nil
+}
+
+// age deja la orden sin cambios desde hace d, como si estuviera atascada.
+func (r *fakeRepo) age(id order.OrderID, d time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	o := r.orders[id]
+	o.UpdatedAt = time.Now().Add(-d)
+	r.orders[id] = o
 }

@@ -20,6 +20,10 @@ var allowed = map[[2]Status]bool{
 	{Paid, RefundRequired}:    true,
 	{Issuing, Issued}:         true,
 	{Issuing, RefundRequired}: true,
+	// Operaciones puede reintentar la emisión de una orden marcada para reembolso, y si la póliza
+	// aparece (p. ej. el emisor terminó de emitir tarde) la verdad es ISSUED: aún no se reembolsó nada.
+	{RefundRequired, Issuing}: true,
+	{RefundRequired, Issued}:  true,
 }
 
 func TestCanTransitionTo_AllCombinations(t *testing.T) {
@@ -34,12 +38,12 @@ func TestCanTransitionTo_AllCombinations(t *testing.T) {
 }
 
 func TestTerminalStatuses(t *testing.T) {
-	for _, s := range []Status{Issued, Failed, RefundRequired} {
+	for _, s := range []Status{Issued, Failed} {
 		if !s.IsTerminal() {
 			t.Errorf("%s debería ser terminal", s)
 		}
 	}
-	for _, s := range []Status{Created, Quoted, PaymentPending, Paid, Issuing} {
+	for _, s := range []Status{Created, Quoted, PaymentPending, Paid, Issuing, RefundRequired} {
 		if s.IsTerminal() {
 			t.Errorf("%s no debería ser terminal", s)
 		}

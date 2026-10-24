@@ -21,6 +21,10 @@ const (
 	ReasonOrderNotFound          = "ORDER_NOT_FOUND"
 	ReasonIssueRejected          = "ISSUE_REJECTED"
 	ReasonIssuerUnavailable      = "ISSUER_UNAVAILABLE"
+	// ReasonIssueFailedDefinitively: tras varias rondas de reconciliación la póliza sigue sin existir.
+	ReasonIssueFailedDefinitively = "ISSUE_FAILED_DEFINITIVELY"
+	// ReasonMarkedForReversal: un operador decidió el reverso.
+	ReasonMarkedForReversal = "MARKED_FOR_REVERSAL"
 )
 
 // processingBudget limita cotizar y guardar, aun desligado de la cancelación del cliente:
@@ -87,22 +91,37 @@ func (uc *CreateOrder) Execute(ctx context.Context, idempotencyKey string, in or
 }
 
 func (uc *CreateOrder) quote(ctx context.Context, o order.Order) (order.Order, error) {
+	ev, cmds, err := quoteOrder(ctx, uc.quoter, uc.sleep, uc.log, uc.now, &o)
+	if err != nil {
+		return order.Order{}, err
+	}
+	if err := uc.repo.SaveTransition(ctx, o, ev, cmds...); err != nil {
+		return order.Order{}, fmt.Errorf("save transition to %s: %w", ev.To, err)
+	}
+	return o, nil
+}
+
+// quoteOrder cotiza la orden (con reintentos) y la lleva a QUOTED, con el comando para pedir el pago, o a
+// FAILED con su motivo. No guarda nada: lo usan la creación de la orden y el reconciliador.
+func quoteOrder(ctx context.Context, quoter Quoter, sleep func(context.Context, time.Duration) error, log *slog.Logger,
+	now func() time.Time, o *order.Order) (order.Event, []Command, error) {
 	req := QuoteRequest{Plate: o.Plate.Raw(), VehicleYear: o.VehicleYear, CityCode: o.CityCode, DocumentID: o.DocumentID.Raw()}
-	q, attempts, err := withRetry(ctx, quotePolicy, uc.sleep, isTransient(ErrQuoteUnavailable),
-		func(ctx context.Context) (order.Quote, error) { return uc.quoter.Quote(ctx, req) })
+	q, attempts, err := withRetry(ctx, quotePolicy, sleep, isTransient(ErrQuoteUnavailable),
+		func(ctx context.Context) (order.Quote, error) { return quoter.Quote(ctx, req) })
 	if err != nil {
 		reason := ReasonQuoteUnavailable
 		if errors.Is(err, ErrQuoteRejected) {
 			reason = ReasonQuoteRejected
 		}
-		uc.log.Error("quote failed", "order_id", o.ID, "attempts", attempts, "reason", reason, "error", err)
+		log.Error("quote failed", "order_id", o.ID, "attempts", attempts, "reason", reason, "error", err)
 		o.FailureReason = reason
-		return transition(ctx, uc.repo, uc.now, o, order.Failed, reason)
+		ev, err := o.Transition(order.Failed, reason, now())
+		return ev, nil, err
 	}
 	o.Quote = &q
-	uc.log.Info("order quoted", "order_id", o.ID, "attempts", attempts)
-	return transition(ctx, uc.repo, uc.now, o, order.Quoted, "quote received",
-		Command{Type: CommandRequestPayment, OrderID: o.ID})
+	log.Info("order quoted", "order_id", o.ID, "attempts", attempts)
+	ev, err := o.Transition(order.Quoted, "quote received", now())
+	return ev, []Command{{Type: CommandRequestPayment, OrderID: o.ID}}, err
 }
 
 // transition aplica el cambio de estado y lo guarda junto con su evento y sus comandos.
