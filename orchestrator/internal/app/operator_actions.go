@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/order"
+	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/trace"
 )
 
 // errOperatorRequired protege la regla de auditoría: ninguna acción manual se ejecuta sin saber quién la pidió.
@@ -86,6 +87,6 @@ func (a *OperatorActions) save(ctx context.Context, o order.Order, ev order.Even
 	if err := a.repo.SaveTransition(ctx, o, ev, cmds...); err != nil {
 		return order.Order{}, fmt.Errorf("save operator action: %w", err)
 	}
-	a.log.Info("operator action executed", "order_id", o.ID, "operator", operator, "reason", ev.Reason, "status", o.Status)
+	trace.Logger(ctx, a.log).Info("operator action executed", "order_id", o.ID, "operator", operator, "reason", ev.Reason, "status", o.Status)
 	return o, nil
 }
