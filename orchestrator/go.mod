@@ -5,6 +5,7 @@ go 1.27
 require (
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/rabbitmq/amqp091-go v1.16.0
+	github.com/sony/gobreaker/v2 v2.4.0
 	golang.org/x/sync v0.17.0
 )
 
