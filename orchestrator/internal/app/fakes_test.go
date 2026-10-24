@@ -74,13 +74,53 @@ func (r *fakeRepo) SaveTransition(ctx context.Context, o order.Order, ev order.E
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if cur, ok := r.orders[o.ID]; ok && cur.Status != ev.From {
-		return fmt.Errorf("%w: order %s is no longer in %s", order.ErrInvalidTransition, o.ID, ev.From)
+	if err := r.checkFromLocked(o.ID, ev.From); err != nil {
+		return err
 	}
 	r.orders[o.ID] = o
 	r.events = append(r.events, ev)
 	r.commands = append(r.commands, cmds...)
 	return nil
+}
+
+// checkFromLocked replica el UPDATE ... WHERE status = <origen>: una orden inexistente o que ya cambió
+// de estado no se actualiza.
+func (r *fakeRepo) checkFromLocked(id order.OrderID, from order.Status) error {
+	if cur, ok := r.orders[id]; !ok || cur.Status != from {
+		return fmt.Errorf("%w: order %s is no longer in %s", order.ErrInvalidTransition, id, from)
+	}
+	return nil
+}
+
+// fakeSnapshot permite simular el rollback de una transacción.
+type fakeSnapshot struct {
+	orders    map[order.OrderID]order.Order
+	byPayment map[order.PaymentID]order.OrderID
+	events    int
+	payEvents []storedPaymentEvent
+}
+
+func (r *fakeRepo) snapshotLocked() fakeSnapshot {
+	s := fakeSnapshot{orders: map[order.OrderID]order.Order{}, byPayment: map[order.PaymentID]order.OrderID{}, events: len(r.events)}
+	for k, v := range r.orders {
+		s.orders[k] = v
+	}
+	for k, v := range r.byPayment {
+		s.byPayment[k] = v
+	}
+	for _, p := range r.payEvents {
+		s.payEvents = append(s.payEvents, *p)
+	}
+	return s
+}
+
+func (r *fakeRepo) rollbackLocked(s fakeSnapshot) {
+	r.orders, r.byPayment, r.events = s.orders, s.byPayment, r.events[:s.events]
+	r.payEvents = r.payEvents[:0]
+	for i := range s.payEvents {
+		p := s.payEvents[i]
+		r.payEvents = append(r.payEvents, &p)
+	}
 }
 
 func (r *fakeRepo) RecordDeadLetter(_ context.Context, dl DeadLetter) error {
@@ -101,9 +141,10 @@ func (r *fakeRepo) MarkPaymentPending(ctx context.Context, o order.Order, ev ord
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if cur, ok := r.orders[o.ID]; ok && cur.Status != ev.From {
-		return order.Order{}, fmt.Errorf("%w: order %s is no longer in %s", order.ErrInvalidTransition, o.ID, ev.From)
+	if err := r.checkFromLocked(o.ID, ev.From); err != nil {
+		return order.Order{}, err
 	}
+	snap := r.snapshotLocked()
 	r.orders[o.ID] = o
 	r.byPayment[o.PaymentID] = o.ID
 	r.events = append(r.events, ev)
@@ -117,6 +158,7 @@ func (r *fakeRepo) MarkPaymentPending(ctx context.Context, o order.Order, ev ord
 	sort.SliceStable(pending, func(i, j int) bool { return pending[i].ev.OccurredAt.Before(pending[j].ev.OccurredAt) })
 	for _, s := range pending {
 		if _, err := r.applyLocked(o.ID, s, apply); err != nil {
+			r.rollbackLocked(snap) // como Postgres: si algo falla, no queda nada de esta transacción
 			return order.Order{}, err
 		}
 	}
@@ -134,6 +176,7 @@ func (r *fakeRepo) RecordPaymentEvent(ctx context.Context, ev PaymentEvent, appl
 			return PaymentEventResult{Outcome: PaymentDuplicate}, nil
 		}
 	}
+	snap := r.snapshotLocked()
 	s := &storedPaymentEvent{ev: ev}
 	r.payEvents = append(r.payEvents, s)
 	id, ok := r.byPayment[ev.PaymentID]
@@ -142,6 +185,7 @@ func (r *fakeRepo) RecordPaymentEvent(ctx context.Context, ev PaymentEvent, appl
 	}
 	outcome, err := r.applyLocked(id, s, apply)
 	if err != nil {
+		r.rollbackLocked(snap) // ni el evento ni el cambio de estado quedan, igual que en Postgres
 		return PaymentEventResult{}, err
 	}
 	return PaymentEventResult{Outcome: outcome, OrderID: id}, nil

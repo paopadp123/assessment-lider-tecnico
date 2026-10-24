@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -66,6 +67,22 @@ func TestWebhook_DuplicateHasNoSecondEffect(t *testing.T) {
 
 	if err != nil || res.Outcome != PaymentDuplicate || len(repo.events) != before {
 		t.Fatalf("res=%+v err=%v eventos %d→%d", res, err, before, len(repo.events))
+	}
+}
+
+// Si la decisión de dominio falla por algo que no es un conflicto, no queda nada: ni el evento ni el cambio.
+func TestWebhook_ApplyErrorLeavesNoTrace(t *testing.T) {
+	repo, id := pendingOrder(t)
+	events := len(repo.events)
+	failing := func(*order.Order, PaymentEvent) (order.Event, error) { return order.Event{}, errors.New("boom") }
+
+	_, err := repo.RecordPaymentEvent(context.Background(), approved(), failing)
+
+	if err == nil {
+		t.Fatal("se esperaba error")
+	}
+	if o, _ := repo.Get(context.Background(), id); o.Status != order.PaymentPending || len(repo.events) != events || len(repo.payEvents) != 0 {
+		t.Fatalf("quedó rastro: status=%s eventos %d→%d eventos de pago=%d", o.Status, events, len(repo.events), len(repo.payEvents))
 	}
 }
 
