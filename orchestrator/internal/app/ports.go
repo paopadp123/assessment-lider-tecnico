@@ -108,8 +108,9 @@ const (
 
 // PaymentEventResult es el resultado de registrar un evento de pago.
 type PaymentEventResult struct {
-	Outcome PaymentOutcome
-	OrderID order.OrderID // vacío si la orden aún no se conoce
+	Outcome       PaymentOutcome
+	OrderID       order.OrderID // vacío si la orden aún no se conoce
+	CorrelationID string        // el de la compra, si la orden ya se conoce
 }
 
 // ApplyPaymentFunc decide el cambio de estado de una orden ante un evento de pago y los comandos que ese
@@ -136,11 +137,12 @@ type Command struct {
 
 // OutboxMessage es un comando guardado en la outbox, pendiente de publicar.
 type OutboxMessage struct {
-	ID        int64
-	MessageID string // identificador estable del mensaje en el broker
-	Type      CommandType
-	OrderID   order.OrderID
-	Attempts  int // intentos de publicación fallidos
+	ID            int64
+	MessageID     string // identificador estable del mensaje en el broker
+	Type          CommandType
+	OrderID       order.OrderID
+	Attempts      int    // intentos de publicación fallidos
+	CorrelationID string // el de la compra; viaja en el mensaje
 }
 
 // OutboxStore es el puerto de lectura de la outbox.

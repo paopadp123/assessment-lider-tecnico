@@ -136,22 +136,35 @@ func run(logger *slog.Logger) error {
 	paymentWorker := rabbitmq.NewWorker(conn, topo, app.CommandRequestPayment, requestPayment, logger, time.Second)
 	issueWorker := rabbitmq.NewWorker(conn, topo, app.CommandIssuePolicy, issuePolicy, logger, time.Second)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", httpapi.Health)
-	mux.HandleFunc("GET /ops/breakers", requireOperator(httpapi.Breakers(func() httpapi.BreakerStatus {
-		st := policyIssuer.Status()
-		return httpapi.BreakerStatus{Name: st.Name, State: st.State, ConsecutiveFailures: st.ConsecutiveFailures}
-	})))
-	httpapi.NewOrders(createOrder, repo, logger).Register(mux)
-	httpapi.NewWebhooks(handlePayment, verifier, logger).Register(mux)
-	httpapi.NewLogin(authService, httpapi.NewIPRateLimiter(5), logger).Register(mux)
 	ops := httpapi.NewOps(operatorActions, repo, logger)
-	ops.Register(mux, requireOperator)
+	mux := http.NewServeMux()
+	httpapi.Routes(mux, httpapi.Handlers{
+		Orders:   httpapi.NewOrders(createOrder, repo, logger),
+		Webhooks: httpapi.NewWebhooks(handlePayment, verifier, logger),
+		Login:    httpapi.NewLogin(authService, httpapi.NewIPRateLimiter(5), logger),
+		Ops:      ops,
+		Breakers: httpapi.Breakers(func() httpapi.BreakerStatus {
+			st := policyIssuer.Status()
+			return httpapi.BreakerStatus{Name: st.Name, State: st.State, ConsecutiveFailures: st.ConsecutiveFailures}
+		}),
+		// Listo = la base responde y la conexión con RabbitMQ sigue abierta. Si no, el balanceador deja de
+		// enviarle tráfico a esta réplica sin reiniciarla.
+		Ready: httpapi.Ready(
+			httpapi.Check{Name: "postgres", Probe: pool.Ping},
+			httpapi.Check{Name: "rabbitmq", Probe: func(context.Context) error {
+				if conn.IsClosed() {
+					return errors.New("connection closed")
+				}
+				return nil
+			}},
+		),
+		Require: requireOperator,
+	})
 
 	addr := ":" + envOr("PORT", "8080")
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           httpapi.WithCorrelation(mux), // toda solicitud tiene correlation-id
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second, // corta clientes que envían el cuerpo a goteo (slowloris)
 		WriteTimeout:      20 * time.Second, // cubre la cotización con sus reintentos; el flujo SSE lo desactiva para sí

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/trace"
 )
 
 // HandlePaymentWebhook es el caso de uso que procesa un resultado de pago ya verificado.
@@ -32,10 +34,12 @@ func (uc *HandlePaymentWebhook) Execute(ctx context.Context, ev PaymentEvent) (P
 	if res.OrderID != "" {
 		attrs = append(attrs, "order_id", res.OrderID)
 	}
+	// El PSP no conoce nuestro correlation-id: se toma el de la orden para unir este log con la compra.
+	log := trace.Logger(trace.WithID(ctx, res.CorrelationID), uc.log)
 	if res.Outcome == PaymentAnomaly {
-		uc.log.Warn("payment event conflicts with order status", attrs...)
+		log.Warn("payment event conflicts with order status", attrs...)
 	} else {
-		uc.log.Info("payment event received", attrs...)
+		log.Info("payment event received", attrs...)
 	}
 	return res, nil
 }

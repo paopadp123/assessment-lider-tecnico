@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/order"
+	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/trace"
 )
 
 // CommandOutcome le dice al worker qué hacer con el mensaje después de procesarlo.
@@ -66,7 +67,7 @@ func (uc *RequestPayment) MaxAttempts() int { return uc.maxAttempts }
 // Execute procesa una entrega del comando. Los errores de infraestructura (base de datos) se devuelven
 // como reintento: el mensaje nunca se pierde por una caída temporal de la base.
 func (uc *RequestPayment) Execute(ctx context.Context, d Delivery) CommandResult {
-	log := uc.log.With("order_id", d.OrderID, "message_id", d.MessageID, "attempt", d.Attempt)
+	log := trace.Logger(ctx, uc.log).With("order_id", d.OrderID, "message_id", d.MessageID, "attempt", d.Attempt)
 
 	o, err := uc.repo.Get(ctx, d.OrderID)
 	if errors.Is(err, ErrOrderNotFound) {

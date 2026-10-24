@@ -535,3 +535,118 @@
 
 ### 2026-10-24 11:33 · Claude Code
 > ok
+
+### 2026-10-24 12:02 · Claude Code
+> 
+> 
+> <pasted_content id="5dad">
+> Ran command: `git diff faaefdc feature/hu-05 -- 'orchestrator/*.go' ':!*_test.go' --stat`
+> Ran command: `git diff faaefdc feature/hu-05 --stat`
+> Ran command: `git diff faaefdc feature/hu-05 -- 'orchestrator/**.go' ':!*_test.go' --name-only`
+> Ran command: `git diff faaefdc feature/hu-05 -- '*.go' ':!*_test.go' --name-only`
+> Ran command: `git diff faaefdc feature/hu-05 --name-only -- '*.go' ':!*_test.go'`
+> Viewed issue_policy.go:1-188
+> Viewed reconcile.go:1-133
+> Viewed operator_actions.go:1-92
+> Searched for "order.Issued"
+> Viewed client.go:1-144
+> Viewed 004_policy_issue.sql:1-7
+> Viewed payment_repository.go:1-143
+> Searched for "applyPayment"
+> Viewed create_order.go:145-163
+> Viewed reconcile_repository.go:1-131
+> Viewed worker.go:1-171
+> Viewed request_payment.go:1-154
+> Viewed order_repository.go:95-140
+> Viewed order_repository.go:80-96
+> Viewed outbox_repository.go:1-84
+> Viewed publisher.go:1-93
+> Viewed topology.go:1-122
+> Viewed auth.go:1-161
+> Viewed login.go:1-169
+> Viewed operator_repository.go:1-51
+> Viewed ops.go:1-60
+> Viewed main.go:60-110
+> Viewed main.go:111-170
+> Viewed main.go:195-235
+> Viewed create_order.go:70-115
+> Viewed create_order.go:115-145
+> Viewed ops.go:60-120
+> Viewed dispatcher.go:1-51
+> Viewed revisiones-cruzadas.md:1-70
+> 
+> ### 1. Doble emisión
+> **Sin hallazgo.**
+> Toda emisión pasa obligatoriamente por `issuer.Issue` con `externalRef = o.ID` (ACL idempotente), `reconcile.go` y `operator_actions.go` solo consultan o encolan comandos sin emitir directo, y `order.Issued` solo se asigna en `recordPolicy` si la ACL retorna un `policyNumber` no vacío validado en `decodePolicy`.
+> 
+> ---
+> 
+> ### 2. Orden pagada perdida
+> **Sin hallazgo.**
+> La transición a `PAID` inserta atómicamente `issue_policy` en la `outbox`; si la DLQ agota reintentos la orden permanece en `ISSUING`, y `ClaimStuck` reclama automáticamente órdenes en `PAID` e `ISSUING` con `updated_at` desfasado para reencolar la emisión o escalar a `REFUND_REQUIRED`.
+> 
+> ---
+> 
+> ### 3. Mensajes (Pérdida y Duplicación)
+> 
+> * **Hallazgo 1 (Severidad: Baja)** — Duplicación de comandos en fallos de red post-confirmación (At-Least-Once)
+>   * **Ubicación:** [outbox_repository.go:51-64](file:///d:/Personal/PruebaSimon/orchestrator/internal/adapters/postgres/outbox_repository.go#L51-L64) y [worker.go:153-157](file:///d:/Personal/PruebaSimon/orchestrator/internal/adapters/rabbitmq/worker.go#L153-L157)
+>   * **Escenario:**
+>     1. Una orden está en `PAID` o `QUOTED` y su comando está pendiente en la tabla `outbox`.
+>     2. `PublishPending` toma el lote con `FOR UPDATE SKIP LOCKED` y ejecuta `p.Publish`.
+>     3. RabbitMQ confirma la persistencia del mensaje (`confirm.WaitContext` retorna `ok = true`), pero la conexión con PostgreSQL se interrumpe antes del `COMMIT` de la transacción o el lote falla en un mensaje posterior.
+>     4. La transacción de base de datos hace `ROLLBACK`: el mensaje ya ingresó a RabbitMQ, pero en `outbox` permanece con `published_at IS NULL`.
+>     5. El despachador vuelve a leer el comando en el siguiente ciclo y lo publica por segunda vez.
+>     *(Mismo efecto en `Worker.forward`: si se confirma la publicación a la cola de reintento/DLQ pero el worker cae antes de `d.Ack(false)`, RabbitMQ reentrega el mensaje original al reconectar).*
+>   * **Impacto de negocio:** Ninguno; no hay pérdida de mensajes y la duplicación es absorbida de forma segura por la idempotencia del worker y el control optimista en `saveTransition`.
+>   * **Acción sugerida:** Mantener el comportamiento actual o procesar y confirmar transacciones en lotes unitarios si se busca reducir el tráfico redundante ante fallos transitorios de base de datos.
+> 
+> ---
+> 
+> ### 4. Concurrencia SQL
+> **Sin hallazgo.**
+> `ClaimStuck` usa `FOR UPDATE SKIP LOCKED` y nunca solicita el advisory lock, evitando esperas y deadlocks contra `lockPayment`; ante carreras concurrentes, `saveTransition` exige el estado previo (`WHERE status = $11`) y aborta con `order.ErrInvalidTransition` sin corromper la orden.
+> 
+> ---
+> 
+> ### 5. Seguridad
+> 
+> * **Hallazgo 2 (Severidad: Baja)** — Crecimiento no acotado de memoria en el limitador de IPs bajo ataque distribuido
+>   * **Ubicación:** [login.go:144-149](file:///d:/Personal/PruebaSimon/orchestrator/internal/httpapi/login.go#L144-L149) y [login.go:160-168](file:///d:/Personal/PruebaSimon/orchestrator/internal/httpapi/login.go#L160-L168)
+>   * **Escenario:**
+>     1. Un atacante realiza un escaneo o ataque de fuerza bruta distribuido utilizando más de 10.000 direcciones IP distintas en una ráfaga continua.
+>     2. Al superar `maxTrackedIPs`, `Allow` invoca `pruneIdleLocked`.
+>     3. `pruneIdleLocked` únicamente elimina entradas cuyo bucket esté lleno (`Tokens() >= float64(l.burst)`).
+>     4. Como todas las IPs atacantes consumieron tokens recientemente, ninguna cumple la condición de purga y se eliminan 0 registros.
+>     5. La función inserta la nueva IP de todas formas, permitiendo que el mapa `l.limiters` crezca de forma indefinida en memoria.
+>   * **Impacto de negocio:** Riesgo de incremento sostenido en el consumo de memoria RAM por réplica ante ataques volumétricos distribuidos, sin vulnerar el secreto JWT ni permitir la evasión del límite por IP.
+>   * **Acción sugerida:** Implementar una política de desalojo tipo LRU o descartar las entradas con el timestamp de acceso más antiguo cuando la purga ociosa no reduzca el tamaño del mapa bajo `maxTrackedIPs`.
+> </pasted_content id="5dad">
+> 
+
+### 2026-10-24 12:10 · Claude Code
+> que son los eventos sse? si estas guardando cosas para estudiar?
+
+### 2026-10-24 12:11 · Claude Code
+> como vamos de tiempo
+
+### 2026-10-24 12:20 · Claude Code
+> [Image #2] fallo el ci, guarda la imagen tambien para mostrarle en el video
+
+### 2026-10-24 12:32 · Claude Code
+> y guardaste la imagen para mostrarla?
+
+### 2026-10-24 12:36 · Claude Code
+> listo ya hice el merge
+
+### 2026-10-24 12:37 · Claude Code
+>  HU-06 con el /prompt
+
+### 2026-10-24 15:18 · Claude Code
+> que es opon api? si correlation id unico por compra
+
+### 2026-10-24 15:25 · Claude Code
+> dale
+
+### 2026-10-24 17:37 · Claude Code
+> a cuales 10 paquetes te refieres? has los commit y abre el pr tu, yo lo cierro

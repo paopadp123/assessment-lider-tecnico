@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/order"
+	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/trace"
 )
 
 // Reconciler revisa periódicamente las órdenes atascadas y las destraba según su estado.
@@ -60,9 +61,11 @@ func (r *Reconciler) RunOnce(ctx context.Context) (int, error) {
 		claimErr = fmt.Errorf("claim stuck orders: %w", claimErr)
 	}
 	for _, s := range claimed {
-		log := r.log.With("order_id", s.Order.ID, "status", s.Order.Status, "stuck_since", s.Order.UpdatedAt)
+		// El job corre fuera de cualquier solicitud: cada orden usa el correlation-id de su compra.
+		orderCtx := trace.WithID(ctx, s.Order.CorrelationID)
+		log := trace.Logger(orderCtx, r.log).With("order_id", s.Order.ID, "status", s.Order.Status, "stuck_since", s.Order.UpdatedAt)
 		// Una orden que falla no frena a las demás; se vuelve a revisar en el próximo intervalo.
-		if err := r.reconcile(ctx, log, s); err != nil && !errors.Is(err, order.ErrInvalidTransition) {
+		if err := r.reconcile(orderCtx, log, s); err != nil && !errors.Is(err, order.ErrInvalidTransition) {
 			log.Error("could not reconcile order", "error", err)
 		}
 	}

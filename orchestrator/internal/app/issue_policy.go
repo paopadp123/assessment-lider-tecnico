@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/order"
+	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/trace"
 )
 
 // IssuePolicy procesa el comando issue_policy: emite la póliza de una orden pagada a través de la ACL.
@@ -38,7 +39,7 @@ func (uc *IssuePolicy) MaxAttempts() int { return uc.maxAttempts }
 
 // Execute procesa una entrega del comando. Los errores de base de datos se reintentan.
 func (uc *IssuePolicy) Execute(ctx context.Context, d Delivery) CommandResult {
-	log := uc.log.With("order_id", d.OrderID, "message_id", d.MessageID, "attempt", d.Attempt)
+	log := trace.Logger(ctx, uc.log).With("order_id", d.OrderID, "message_id", d.MessageID, "attempt", d.Attempt)
 
 	o, err := uc.repo.Get(ctx, d.OrderID)
 	if errors.Is(err, ErrOrderNotFound) {

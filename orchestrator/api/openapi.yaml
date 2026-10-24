@@ -1,0 +1,445 @@
+openapi: 3.0.3
+info:
+  title: Orquestador de compra de pólizas
+  version: 1.0.0
+  description: |
+    Coordina la compra de una póliza entre el cotizador, la pasarela de pagos (PSP) y la capa de emisión.
+    Cada compra tiene un correlation-id (cabecera X-Correlation-ID) que la acompaña en todos sus saltos y logs.
+    Las rutas de operación exigen un token JWT de operador (POST /auth/login).
+    Este archivo es la fuente de los tipos TypeScript de la consola; una prueba verifica que las respuestas
+    reales del orquestador lo cumplen.
+servers:
+  - url: http://localhost:8080
+tags:
+  - name: compras
+  - name: pagos
+  - name: operación
+  - name: salud
+
+paths:
+  /orders:
+    post:
+      tags: [compras]
+      summary: Inicia una compra (crea y cotiza la orden)
+      description: |
+        Idempotente por Idempotency-Key: la misma clave con el mismo cuerpo devuelve la misma orden (200);
+        con otro cuerpo responde 422. La intención de pago se pide de forma asíncrona.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/CorrelationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateOrderRequest" }
+      responses:
+        "201":
+          description: Orden creada (normalmente en QUOTED, o FAILED si el cotizador la rechazó)
+          headers: { X-Correlation-ID: { $ref: "#/components/headers/CorrelationId" } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Order" }
+        "200":
+          description: Repetición de una solicitud ya procesada; devuelve la orden original
+          headers: { X-Correlation-ID: { $ref: "#/components/headers/CorrelationId" } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Order" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "422":
+          description: La Idempotency-Key ya se usó con otra solicitud
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /orders/{id}:
+    get:
+      tags: [compras]
+      summary: Consulta una orden
+      parameters:
+        - $ref: "#/components/parameters/OrderId"
+      responses:
+        "200":
+          description: La orden
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Order" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /orders/{id}/events:
+    get:
+      tags: [operación]
+      summary: Línea de tiempo de la orden
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/OrderId"
+      responses:
+        "200":
+          description: Eventos en orden de ocurrencia
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/OrderEvent" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /orders/{id}/actions/retry-issuance:
+    post:
+      tags: [operación]
+      summary: Reintenta la emisión (desde ISSUING o REFUND_REQUIRED)
+      description: Encola la emisión; el worker consulta al emisor antes de emitir, así que nunca duplica una póliza. Queda auditada con el operador del token.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/OrderId"
+      responses:
+        "200":
+          description: Acción registrada
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Order" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /orders/{id}/actions/mark-for-reversal:
+    post:
+      tags: [operación]
+      summary: Marca una orden pagada sin póliza para reverso (desde PAID o ISSUING)
+      description: Deja la orden en REFUND_REQUIRED. El reverso lo ejecuta operaciones; no hay reembolso automático. Queda auditada con el operador del token.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/OrderId"
+      responses:
+        "200":
+          description: Acción registrada
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Order" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /events/stream:
+    get:
+      tags: [operación]
+      summary: Flujo de cambios de estado (Server-Sent Events)
+      description: |
+        Cada mensaje es `id: <id>`, `event: order-status`, `data: <OrderEvent en JSON>`. Al reconectar, el
+        navegador envía Last-Event-ID y recibe lo que se perdió. Sin Last-Event-ID arranca en el presente.
+        Envía un comentario `: ping` cada 15 s.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: Last-Event-ID
+          in: header
+          required: false
+          schema: { type: string, pattern: "^[0-9]+$" }
+      responses:
+        "200":
+          description: Flujo abierto
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /webhooks/payments:
+    post:
+      tags: [pagos]
+      summary: Resultado de un pago enviado por el PSP
+      description: |
+        Firmado con HMAC-SHA256 sobre `paymentId|status|occurredAt`. Idempotente por paymentId + status;
+        tolera eventos que llegan antes de que la orden espere el pago.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PaymentWebhook" }
+      responses:
+        "200":
+          description: Evento registrado (aplicado, duplicado, pendiente o anomalía)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WebhookResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /auth/login:
+    post:
+      tags: [operación]
+      summary: Login de operadores
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+      responses:
+        "200":
+          description: Token JWT de 60 minutos
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LoginResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429":
+          description: Demasiados intentos desde esta IP
+          headers:
+            Retry-After:
+              schema: { type: integer }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /ops/breakers:
+    get:
+      tags: [operación]
+      summary: Estado de los circuit breakers
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Un elemento por breaker
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/BreakerStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /health:
+    get:
+      tags: [salud]
+      summary: Alias de /health/live
+      responses:
+        "200": { $ref: "#/components/responses/Alive" }
+
+  /health/live:
+    get:
+      tags: [salud]
+      summary: El proceso está vivo
+      responses:
+        "200": { $ref: "#/components/responses/Alive" }
+
+  /health/ready:
+    get:
+      tags: [salud]
+      summary: Listo para recibir tráfico (PostgreSQL y RabbitMQ disponibles)
+      responses:
+        "200":
+          description: Listo
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
+        "503":
+          description: Alguna dependencia no responde
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
+
+  /openapi.yaml:
+    get:
+      tags: [salud]
+      summary: Este contrato
+      responses:
+        "200":
+          description: Contrato OpenAPI
+          content:
+            application/yaml:
+              schema: { type: object, description: Documento OpenAPI 3.0 }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    OrderId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 255 }
+    CorrelationId:
+      name: X-Correlation-ID
+      in: header
+      required: false
+      description: Si falta o es inválido, el orquestador genera uno.
+      schema: { $ref: "#/components/schemas/CorrelationId" }
+
+  headers:
+    CorrelationId:
+      description: Correlation-id de la compra (en una repetición, el de la compra original)
+      schema: { $ref: "#/components/schemas/CorrelationId" }
+
+  responses:
+    BadRequest:
+      description: Solicitud inválida
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Falta el token, es inválido o la firma/credencial no coincide
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: No existe
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: La acción no aplica al estado actual de la orden (o cambió mientras tanto)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    InternalError:
+      description: Error interno (el detalle queda en los logs, no en la respuesta)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Alive:
+      description: Vivo
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [status]
+            properties:
+              status: { type: string, enum: [ok] }
+
+  schemas:
+    CorrelationId:
+      type: string
+      pattern: "^[A-Za-z0-9._:-]{1,64}$"
+
+    OrderStatus:
+      type: string
+      enum: [CREATED, QUOTED, PAYMENT_PENDING, PAID, ISSUING, ISSUED, FAILED, REFUND_REQUIRED]
+
+    CreateOrderRequest:
+      type: object
+      additionalProperties: false
+      required: [plate, vehicleYear, cityCode, documentId]
+      properties:
+        plate: { type: string, example: ABC123 }
+        vehicleYear: { type: integer, example: 2020 }
+        cityCode: { type: string, pattern: "^[0-9]{5}$", description: Código DANE del municipio, example: "11001" }
+        documentId: { type: string, example: "1020304050" }
+
+    Quote:
+      type: object
+      additionalProperties: false
+      required: [id, premium, currency, validUntil]
+      properties:
+        id: { type: string }
+        premium: { type: number, description: Prima con decimales exactos }
+        currency: { type: string, example: COP }
+        validUntil: { type: string, format: date-time }
+
+    Order:
+      type: object
+      additionalProperties: false
+      description: Nunca incluye el documento; la placa viene enmascarada.
+      required: [id, status, plate, vehicleYear, cityCode, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        status: { $ref: "#/components/schemas/OrderStatus" }
+        plate: { type: string, example: "ABC***", description: Enmascarada (solo los 3 primeros caracteres) }
+        vehicleYear: { type: integer }
+        cityCode: { type: string }
+        quote: { $ref: "#/components/schemas/Quote" }
+        paymentId: { type: string }
+        policyNumber: { type: string }
+        failureReason: { type: string, example: QUOTE_UNAVAILABLE }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    OrderEvent:
+      type: object
+      additionalProperties: false
+      required: [id, orderId, to, reason, actor, occurredAt]
+      properties:
+        id: { type: integer, format: int64, description: Creciente; sirve como Last-Event-ID }
+        orderId: { type: string, format: uuid }
+        from: { $ref: "#/components/schemas/OrderStatus" }
+        to: { $ref: "#/components/schemas/OrderStatus" }
+        reason: { type: string }
+        actor: { type: string, description: '"system" o el usuario del operador que ejecutó la acción' }
+        occurredAt: { type: string, format: date-time }
+
+    PaymentWebhook:
+      type: object
+      required: [paymentId, status, occurredAt, signature]
+      properties:
+        paymentId: { type: string }
+        status: { type: string, enum: [APPROVED, REJECTED] }
+        occurredAt: { type: string, format: date-time }
+        signature: { type: string, description: HMAC-SHA256 en hexadecimal }
+
+    WebhookResult:
+      type: object
+      additionalProperties: false
+      required: [outcome]
+      properties:
+        outcome: { type: string, enum: [APPLIED, DUPLICATE, PENDING_ORDER, ANOMALY] }
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string }
+        password: { type: string, format: password }
+
+    LoginResponse:
+      type: object
+      additionalProperties: false
+      required: [token, expiresAt]
+      properties:
+        token: { type: string }
+        expiresAt: { type: string, format: date-time }
+
+    BreakerStatus:
+      type: object
+      additionalProperties: false
+      required: [name, state, consecutiveFailures]
+      properties:
+        name: { type: string }
+        state: { type: string, enum: [closed, open, half-open] }
+        consecutiveFailures: { type: integer }
+
+    Readiness:
+      type: object
+      additionalProperties: false
+      required: [status, checks]
+      properties:
+        status: { type: string, enum: [ready, not_ready] }
+        checks:
+          type: object
+          additionalProperties: { type: string, enum: [up, down] }
+
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error: { type: string }
+        fields:
+          type: array
+          items:
+            type: object
+            required: [field, message]
+            properties:
+              field: { type: string }
+              message: { type: string }

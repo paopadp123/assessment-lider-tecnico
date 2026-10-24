@@ -10,6 +10,7 @@ import (
 
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/app"
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/order"
+	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/trace"
 )
 
 // paymentIDFormat excluye "|", el separador del texto firmado: así ningún id puede desplazar
@@ -34,7 +35,7 @@ func NewWebhooks(handler PaymentEventHandler, verifier *SignatureVerifier, log *
 }
 
 // Register registra la ruta en el mux.
-func (h *Webhooks) Register(mux *http.ServeMux) {
+func (h *Webhooks) Register(mux Router) {
 	mux.HandleFunc("POST /webhooks/payments", h.payments)
 }
 
@@ -66,7 +67,7 @@ func (h *Webhooks) payments(w http.ResponseWriter, r *http.Request) {
 	}
 	// Firma ausente o inválida es un problema de autenticación (401), no de formato.
 	if body.Signature == "" || !h.verifier.Verify(body.PaymentID, body.Status, body.OccurredAt, body.Signature) {
-		h.log.WarnContext(r.Context(), "payment webhook with invalid signature", "payment_id", body.PaymentID)
+		trace.Logger(r.Context(), h.log).Warn("payment webhook with invalid signature", "payment_id", body.PaymentID)
 		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "invalid signature"})
 		return
 	}
@@ -77,7 +78,7 @@ func (h *Webhooks) payments(w http.ResponseWriter, r *http.Request) {
 		OccurredAt: occurredAt.UTC(),
 	})
 	if err != nil {
-		h.log.ErrorContext(r.Context(), "payment webhook failed", "payment_id", body.PaymentID, "error", err)
+		trace.Logger(r.Context(), h.log).Error("payment webhook failed", "payment_id", body.PaymentID, "error", err)
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal error"})
 		return
 	}

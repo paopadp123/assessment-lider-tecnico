@@ -14,6 +14,7 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/app"
+	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/trace"
 )
 
 // testBroker conecta al RabbitMQ de pruebas y declara una topología con prefijo único,
@@ -59,16 +60,18 @@ type scriptedHandler struct {
 	at       []time.Time
 	done     chan struct{}
 	delay    time.Duration // espera pedida en los resultados DEFERRED
+	corrs    []string      // correlation-id que llegó en el contexto de cada entrega
 }
 
 func newScripted(outcomes ...app.CommandOutcome) *scriptedHandler {
 	return &scriptedHandler{outcomes: outcomes, done: make(chan struct{}, 10)}
 }
 
-func (h *scriptedHandler) Execute(_ context.Context, d app.Delivery) app.CommandResult {
+func (h *scriptedHandler) Execute(ctx context.Context, d app.Delivery) app.CommandResult {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.got = append(h.got, d)
+	h.corrs = append(h.corrs, trace.ID(ctx))
 	h.at = append(h.at, time.Now())
 	out := h.outcomes[min(len(h.got), len(h.outcomes))-1]
 	h.done <- struct{}{}
@@ -114,7 +117,7 @@ func publishCommand(t *testing.T, conn *amqp.Connection, topo Topology, cmd app.
 		t.Fatal(err)
 	}
 	defer pub.Close()
-	msg := app.OutboxMessage{MessageID: id, Type: cmd, OrderID: "order-1"}
+	msg := app.OutboxMessage{MessageID: id, Type: cmd, OrderID: "order-1", CorrelationID: "corr-1"}
 	if err := pub.Publish(context.Background(), msg); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
@@ -191,7 +194,7 @@ func TestDeadLetter_GoesToDLQWithReasonAndAttempts(t *testing.T) {
 	h.wait(t, 1)
 	d := getDeadLetter(t, conn, topo)
 
-	if d.MessageId != "msg-1" || d.Headers[reasonHeader] != "PAYMENT_UNAVAILABLE" || attemptOf(d) != 1 {
+	if d.MessageId != "msg-1" || d.Headers[reasonHeader] != "PAYMENT_UNAVAILABLE" || attemptOf(d) != 1 || d.CorrelationId != "corr-1" {
 		t.Fatalf("mensaje en DLQ: id=%s headers=%v", d.MessageId, d.Headers)
 	}
 }
@@ -267,5 +270,28 @@ func TestDeferred_RedeliversAfterDelayWithSameAttempt(t *testing.T) {
 		if gap := h.at[i].Sub(h.at[i-1]); gap < h.delay {
 			t.Fatalf("entrega %d llegó a los %v; debía esperar al menos %v", i+1, gap, h.delay)
 		}
+	}
+}
+
+// El correlation-id de la compra viaja en el mensaje y llega al caso de uso en el contexto, también en los
+// reintentos (la copia a la cola de reintento lo conserva).
+func TestCorrelationID_TravelsWithTheMessageAndSurvivesRetries(t *testing.T) {
+	conn, topo := testBroker(t)
+	h := newScripted(app.CommandRetry, app.CommandDone)
+	startWorker(t, conn, topo, h, 10*time.Millisecond)
+	pub, err := NewPublisher(conn, topo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pub.Close()
+
+	if err := pub.Publish(context.Background(), app.OutboxMessage{MessageID: "msg-1", Type: app.CommandRequestPayment,
+		OrderID: "order-1", CorrelationID: "corr-1"}); err != nil {
+		t.Fatal(err)
+	}
+	h.wait(t, 2)
+
+	if h.corrs[0] != "corr-1" || h.corrs[1] != "corr-1" {
+		t.Fatalf("correlation-id en las entregas = %v", h.corrs)
 	}
 }

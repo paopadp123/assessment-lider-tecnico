@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/order"
+	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/trace"
 )
 
 // Motivos de falla visibles para operaciones.
@@ -65,6 +66,13 @@ func (uc *CreateOrder) Execute(ctx context.Context, idempotencyKey string, in or
 	if err != nil {
 		return CreateOrderResult{}, err
 	}
+	// La compra hereda el correlation-id de la solicitud (o uno nuevo) y lo conserva en todos sus saltos.
+	o.CorrelationID = trace.ID(ctx)
+	if o.CorrelationID == "" {
+		o.CorrelationID = trace.New()
+		ctx = trace.WithID(ctx, o.CorrelationID)
+	}
+	log := trace.Logger(ctx, uc.log)
 	now := uc.now()
 	o.CreatedAt, o.UpdatedAt = now, now
 	created := order.Event{To: order.Created, Reason: "order created", OccurredAt: now}
@@ -77,21 +85,21 @@ func (uc *CreateOrder) Execute(ctx context.Context, idempotencyKey string, in or
 	if !isNew {
 		return CreateOrderResult{Order: saved}, nil
 	}
-	uc.log.Info("order created", "order_id", saved.ID, "plate", saved.Plate)
+	log.Info("order created", "order_id", saved.ID, "plate", saved.Plate)
 
 	// La orden ya existe: si el cliente se desconecta, la cotización debe terminar igual
 	// para no dejarla atascada en CREATED, pero con un límite de tiempo propio.
 	procCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), processingBudget)
 	defer cancel()
-	quoted, err := uc.quote(procCtx, saved)
+	quoted, err := uc.quote(procCtx, log, saved)
 	if err != nil {
 		return CreateOrderResult{}, err
 	}
 	return CreateOrderResult{Order: quoted, Created: true}, nil
 }
 
-func (uc *CreateOrder) quote(ctx context.Context, o order.Order) (order.Order, error) {
-	ev, cmds, err := quoteOrder(ctx, uc.quoter, uc.sleep, uc.log, uc.now, &o)
+func (uc *CreateOrder) quote(ctx context.Context, log *slog.Logger, o order.Order) (order.Order, error) {
+	ev, cmds, err := quoteOrder(ctx, uc.quoter, uc.sleep, log, uc.now, &o)
 	if err != nil {
 		return order.Order{}, err
 	}

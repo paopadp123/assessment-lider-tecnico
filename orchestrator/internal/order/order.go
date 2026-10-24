@@ -34,6 +34,7 @@ type Order struct {
 	PaymentID     PaymentID
 	PolicyNumber  PolicyNumber
 	FailureReason string
+	CorrelationID string // identifica la compra en todos sus saltos y logs
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 }

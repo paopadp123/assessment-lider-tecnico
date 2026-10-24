@@ -13,6 +13,7 @@ import (
 
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/app"
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/order"
+	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/trace"
 )
 
 // OperatorActionRunner ejecuta las acciones operativas.
@@ -44,7 +45,7 @@ func NewOps(actions OperatorActionRunner, events app.EventReader, log *slog.Logg
 func (h *Ops) CloseStreams() { h.closeOnce.Do(func() { close(h.closing) }) }
 
 // Register registra las rutas protegidas con require.
-func (h *Ops) Register(mux *http.ServeMux, require func(http.HandlerFunc) http.HandlerFunc) {
+func (h *Ops) Register(mux Router, require func(http.HandlerFunc) http.HandlerFunc) {
 	mux.HandleFunc("POST /orders/{id}/actions/retry-issuance", require(h.action(OperatorActionRunner.RetryIssuance)))
 	mux.HandleFunc("POST /orders/{id}/actions/mark-for-reversal", require(h.action(OperatorActionRunner.MarkForReversal)))
 	mux.HandleFunc("GET /orders/{id}/events", require(h.listEvents))
@@ -158,7 +159,7 @@ func (h *Ops) stream(w http.ResponseWriter, r *http.Request) {
 			events, err := h.events.EventsAfter(ctx, cursor.last, 100)
 			if err != nil {
 				if ctx.Err() == nil {
-					h.log.ErrorContext(ctx, "read events for stream", "error", err)
+					trace.Logger(ctx, h.log).Error("read events for stream", "error", err)
 				}
 				continue
 			}
@@ -193,7 +194,7 @@ func orderIDFrom(w http.ResponseWriter, r *http.Request) (order.OrderID, bool) {
 }
 
 func (h *Ops) internalError(w http.ResponseWriter, r *http.Request, err error) {
-	h.log.ErrorContext(r.Context(), "request failed", "method", r.Method, "path", r.URL.Path, "error", err)
+	trace.Logger(r.Context(), h.log).Error("request failed", "method", r.Method, "path", r.URL.Path, "error", err)
 	writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal error"})
 }
 
