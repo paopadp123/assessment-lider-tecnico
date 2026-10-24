@@ -382,7 +382,9 @@ func (r *fakeRepo) ClaimStuck(ctx context.Context, before time.Time, limit int) 
 		if len(out) == limit {
 			break
 		}
-		r.reconciled[id] = before.Add(time.Nanosecond) // "ahora" es posterior al umbral
+		// Como el repositorio real (reconciled_at = now() de la base): la hora actual, no una derivada del
+		// umbral. Con "umbral + 1 ns" la prueba pasaba en Windows (reloj grueso) y fallaba en el CI de Linux.
+		r.reconciled[id] = time.Now()
 		out = append(out, StuckOrder{Order: o, IssueMisses: r.issueMisses[id]})
 	}
 	return out, nil
