@@ -12,6 +12,7 @@ import (
 
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/app"
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/order"
+	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/trace"
 )
 
 const maxResponseBytes = 64 << 10
@@ -61,6 +62,9 @@ func (c *Client) CreatePayment(ctx context.Context, req app.PaymentRequest) (ord
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Idempotency-Key", string(req.OrderID))
+	if id := trace.ID(ctx); id != "" {
+		httpReq.Header.Set(trace.Header, id) // el tercero puede cruzar sus logs con los de la compra
+	}
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {

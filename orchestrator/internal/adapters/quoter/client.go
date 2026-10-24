@@ -14,6 +14,7 @@ import (
 
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/app"
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/order"
+	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/trace"
 )
 
 const maxResponseBytes = 64 << 10
@@ -62,6 +63,9 @@ func (c *Client) Quote(ctx context.Context, req app.QuoteRequest) (order.Quote, 
 		return order.Quote{}, fmt.Errorf("build quote request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if id := trace.ID(ctx); id != "" {
+		httpReq.Header.Set(trace.Header, id) // el tercero puede cruzar sus logs con los de la compra
+	}
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
