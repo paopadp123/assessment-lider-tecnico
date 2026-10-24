@@ -39,10 +39,10 @@ func NewOrderRepository(pool *pgxpool.Pool) *OrderRepository {
 func (r *OrderRepository) Create(ctx context.Context, key app.IdempotencyKey, o order.Order, ev order.Event) (order.Order, bool, error) {
 	err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		if err := tx.QueryRow(ctx, `
-			INSERT INTO orders (status, plate, document_id, vehicle_year, city_code, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
+			INSERT INTO orders (status, plate, document_id, vehicle_year, city_code, correlation_id, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), $7, $8)
 			RETURNING id`,
-			o.Status, o.Plate.Raw(), o.DocumentID.Raw(), o.VehicleYear, o.CityCode, o.CreatedAt, o.UpdatedAt,
+			o.Status, o.Plate.Raw(), o.DocumentID.Raw(), o.VehicleYear, o.CityCode, o.CorrelationID, o.CreatedAt, o.UpdatedAt,
 		).Scan(&o.ID); err != nil {
 			return fmt.Errorf("insert order: %w", err)
 		}
@@ -134,16 +134,17 @@ func loadOrder(ctx context.Context, q querier, where string, arg any, suffix ...
 		quoteID, premium, currency, paymentID *string
 		validUntil                            *time.Time
 		failureReason, policyNumber           *string
+		correlationID                         *string
 	)
 	sql := `
 		SELECT id::text, status, plate, document_id, vehicle_year, city_code,
-		       quote_id, premium::text, currency, quote_valid_until, payment_id, failure_reason, policy_number, created_at, updated_at
+		       quote_id, premium::text, currency, quote_valid_until, payment_id, failure_reason, policy_number, correlation_id, created_at, updated_at
 		FROM orders WHERE ` + where
 	for _, s := range suffix {
 		sql += " " + s
 	}
 	err := q.QueryRow(ctx, sql, arg).Scan(&o.ID, &o.Status, &plate, &doc, &o.VehicleYear, &o.CityCode,
-		&quoteID, &premium, &currency, &validUntil, &paymentID, &failureReason, &policyNumber, &o.CreatedAt, &o.UpdatedAt)
+		&quoteID, &premium, &currency, &validUntil, &paymentID, &failureReason, &policyNumber, &correlationID, &o.CreatedAt, &o.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return order.Order{}, app.ErrOrderNotFound
 	}
@@ -167,6 +168,7 @@ func loadOrder(ctx context.Context, q querier, where string, arg any, suffix ...
 	o.PaymentID = order.PaymentID(deref(paymentID))
 	o.FailureReason = deref(failureReason)
 	o.PolicyNumber = order.PolicyNumber(deref(policyNumber))
+	o.CorrelationID = deref(correlationID)
 	return o, nil
 }
 

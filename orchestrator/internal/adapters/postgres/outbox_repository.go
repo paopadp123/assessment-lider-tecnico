@@ -16,8 +16,17 @@ var (
 
 func insertCommands(ctx context.Context, tx pgx.Tx, cmds []app.Command) error {
 	for _, c := range cmds {
-		if _, err := tx.Exec(ctx, `INSERT INTO outbox (type, order_id) VALUES ($1, $2)`, string(c.Type), string(c.OrderID)); err != nil {
+		// El comando copia el correlation-id de su orden: quien lo encole (creación, webhook, reconciliador,
+		// operador) no necesita conocerlo.
+		tag, err := tx.Exec(ctx, `
+			INSERT INTO outbox (type, order_id, correlation_id)
+			SELECT $1, id, correlation_id FROM orders WHERE id = $2`, string(c.Type), string(c.OrderID))
+		if err != nil {
 			return fmt.Errorf("insert outbox command: %w", err)
+		}
+		// Con INSERT ... SELECT una orden inexistente no daría error: se insertarían cero filas en silencio.
+		if tag.RowsAffected() == 0 {
+			return fmt.Errorf("insert outbox command: %w", app.ErrOrderNotFound)
 		}
 	}
 	return nil
@@ -30,7 +39,7 @@ func (r *OrderRepository) PublishPending(ctx context.Context, limit int, publish
 	published := 0
 	err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
-			SELECT id, message_id::text, type, order_id::text, attempts
+			SELECT id, message_id::text, type, order_id::text, attempts, COALESCE(correlation_id, '')
 			FROM outbox
 			WHERE published_at IS NULL
 			ORDER BY id
@@ -41,7 +50,7 @@ func (r *OrderRepository) PublishPending(ctx context.Context, limit int, publish
 		}
 		msgs, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (app.OutboxMessage, error) {
 			var m app.OutboxMessage
-			err := row.Scan(&m.ID, &m.MessageID, &m.Type, &m.OrderID, &m.Attempts)
+			err := row.Scan(&m.ID, &m.MessageID, &m.Type, &m.OrderID, &m.Attempts, &m.CorrelationID)
 			return m, err
 		})
 		if err != nil {

@@ -104,7 +104,7 @@ func (r *OrderRepository) RecordPaymentEvent(ctx context.Context, ev app.Payment
 		if err != nil {
 			return err
 		}
-		res = app.PaymentEventResult{Outcome: outcome, OrderID: o.ID}
+		res = app.PaymentEventResult{Outcome: outcome, OrderID: o.ID, CorrelationID: o.CorrelationID}
 		return nil
 	})
 	if err != nil {
