@@ -16,6 +16,7 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/adapters/issuer"
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/adapters/postgres"
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/adapters/psp"
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/adapters/quoter"
@@ -61,6 +62,10 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	issuerURL, err := requiredEnv("ISSUER_URL")
+	if err != nil {
+		return err
+	}
 
 	pool, err := pgxpool.New(ctx, dbURL)
 	if err != nil {
@@ -97,11 +102,22 @@ func run(logger *slog.Logger) error {
 	createOrder := app.NewCreateOrder(repo, quoteClient, logger)
 	handlePayment := app.NewHandlePaymentWebhook(repo, logger)
 	requestPayment := app.NewRequestPayment(repo, repo, pspClient, logger)
+	// El breaker se abre tras 5 fallas seguidas y prueba de nuevo a los 30 s. Las emisiones que llegan con el
+	// circuito abierto esperan en la cola ese mismo tiempo, sin consumir intentos (ver ADR 0003).
+	const issuerOpenTimeout = 30 * time.Second
+	policyIssuer := issuer.NewBreaker(issuer.NewClient(issuerURL, &http.Client{}),
+		issuer.BreakerSettings{FailureThreshold: 5, OpenTimeout: issuerOpenTimeout}, logger)
+	issuePolicy := app.NewIssuePolicy(repo, repo, policyIssuer, logger, issuerOpenTimeout)
 	dispatcher := app.NewDispatcher(repo, publisher, logger)
-	worker := rabbitmq.NewWorker(conn, topo, requestPayment, logger, time.Second)
+	paymentWorker := rabbitmq.NewWorker(conn, topo, app.CommandRequestPayment, requestPayment, logger, time.Second)
+	issueWorker := rabbitmq.NewWorker(conn, topo, app.CommandIssuePolicy, issuePolicy, logger, time.Second)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", httpapi.Health)
+	mux.HandleFunc("GET /ops/breakers", httpapi.Breakers(func() httpapi.BreakerStatus {
+		st := policyIssuer.Status()
+		return httpapi.BreakerStatus{Name: st.Name, State: st.State, ConsecutiveFailures: st.ConsecutiveFailures}
+	}))
 	httpapi.NewOrders(createOrder, repo, logger).Register(mux)
 	httpapi.NewWebhooks(handlePayment, verifier, logger).Register(mux)
 
@@ -114,7 +130,7 @@ func run(logger *slog.Logger) error {
 		WriteTimeout:      20 * time.Second, // cubre la cotización con sus reintentos; el pago ya no va en la petición
 	}
 
-	// API, despachador de la outbox y worker de pagos corren juntos en este proceso. Si cualquiera falla
+	// API, despachador de la outbox y workers de pago y emisión corren juntos en este proceso. Si cualquiera falla
 	// (p. ej. se cae la conexión con RabbitMQ), se detiene todo y el orquestador de contenedores lo reinicia.
 	// En producción serían despliegues separados que escalan por separado (ver ADR 0002).
 	g, gctx := errgroup.WithContext(ctx)
@@ -135,7 +151,8 @@ func run(logger *slog.Logger) error {
 			return fmt.Errorf("rabbitmq publisher channel closed: %v", err)
 		}
 	})
-	g.Go(func() error { return worker.Run(gctx) })
+	g.Go(func() error { return paymentWorker.Run(gctx) })
+	g.Go(func() error { return issueWorker.Run(gctx) })
 	g.Go(func() error {
 		<-gctx.Done()
 		logger.Info("shutting down")

@@ -24,12 +24,14 @@ type CommandHandler interface {
 
 // Worker consume la cola de trabajo y traduce el resultado del caso de uso a operaciones del broker:
 // DONE → ack; RETRY → copia a la cola de reintento del nivel con TTL = backoff con jitter, y ack;
+// DEFERRED → copia a la cola de aplazados con TTL = la espera pedida y el MISMO intento, y ack;
 // DEAD_LETTER → copia a la DLQ con el motivo, y ack. El ack siempre va después de que el broker confirmó
 // la copia: si el proceso muere en medio, el mensaje se reentrega (al menos una vez) y el caso de uso,
 // idempotente por estado, no repite el efecto.
 type Worker struct {
 	conn      *amqp.Connection
 	topo      Topology
+	cmd       app.CommandType
 	handler   CommandHandler
 	log       *slog.Logger
 	prefetch  int
@@ -37,9 +39,10 @@ type Worker struct {
 	backoff   func(base time.Duration, attempt int) time.Duration // reemplazable en pruebas para medir el TTL
 }
 
-// NewWorker arma el worker. retryBase es la base del backoff exponencial entre reintentos.
-func NewWorker(conn *amqp.Connection, topo Topology, handler CommandHandler, log *slog.Logger, retryBase time.Duration) *Worker {
-	return &Worker{conn: conn, topo: topo, handler: handler, log: log, prefetch: 10, retryBase: retryBase, backoff: app.Backoff}
+// NewWorker arma el worker de un comando. retryBase es la base del backoff exponencial entre reintentos.
+func NewWorker(conn *amqp.Connection, topo Topology, cmd app.CommandType, handler CommandHandler, log *slog.Logger, retryBase time.Duration) *Worker {
+	return &Worker{conn: conn, topo: topo, cmd: cmd, handler: handler, log: log.With("command", cmd),
+		prefetch: 10, retryBase: retryBase, backoff: app.Backoff}
 }
 
 // Run consume hasta que se cancele el contexto. Si el canal se cierra (caída del broker), devuelve error:
@@ -64,10 +67,11 @@ func (w *Worker) Run(ctx context.Context) error {
 	// Consume sin contexto a propósito: ConsumeWithContext cancela el consumidor desde otra goroutine al
 	// cancelarse el contexto, y esa cancelación compite con el Close diferido sobre el mismo canal; en CI
 	// (Linux con -race) dejó Close esperando para siempre. El apagado se hace aquí, en secuencia.
-	const consumerTag = "payment-worker"
-	deliveries, err := ch.Consume(w.topo.PaymentQueue(), consumerTag, false, false, false, false, nil)
+	consumerTag := string(w.cmd) + "-worker"
+	queue := w.topo.Queue(w.cmd)
+	deliveries, err := ch.Consume(queue, consumerTag, false, false, false, false, nil)
 	if err != nil {
-		return fmt.Errorf("consume %s: %w", w.topo.PaymentQueue(), err)
+		return fmt.Errorf("consume %s: %w", queue, err)
 	}
 	for {
 		select {
@@ -112,11 +116,16 @@ func (w *Worker) handle(ctx context.Context, pub *Publisher, d amqp.Delivery) {
 	case app.CommandRetry:
 		// El jitter puede dar 0; un TTL mínimo de 1 ms garantiza que el mensaje no se quede sin vencer en la cola de reintento.
 		delay := max(w.backoff(w.retryBase, attempt), time.Millisecond)
-		err = w.forward(ctx, pub, d, w.topo.RetryExchange(), retryRoutingKey(min(attempt, w.topo.RetryLevels)), attempt+1, res.Reason, delay)
+		err = w.forward(ctx, pub, d, w.topo.RetryExchange(), retryRoutingKey(w.cmd, min(attempt, w.topo.RetryLevels)), attempt+1, res.Reason, delay)
+	case app.CommandDeferred:
+		// Aplazar no consume un intento: el tercero no se llamó (breaker abierto), así que una caída larga
+		// no termina en la DLQ. La orden sigue visible en su estado mientras espera.
+		delay := max(res.Delay, time.Millisecond)
+		err = w.forward(ctx, pub, d, w.topo.RetryExchange(), deferredRoutingKey(w.cmd), attempt, res.Reason, delay)
 	case app.CommandDeadLetter:
 		// Si esta copia falla, el mensaje se reencola; la reentrega encuentra la orden en FAILED y termina
 		// sin copia en la DLQ del broker. La fila de dead_letters (fuente para operaciones) sí quedó guardada.
-		err = w.forward(ctx, pub, d, w.topo.DeadLetterExchange(), paymentRoutingKey, attempt, res.Reason, 0)
+		err = w.forward(ctx, pub, d, w.topo.DeadLetterExchange(), string(w.cmd), attempt, res.Reason, 0)
 	default:
 		err = fmt.Errorf("unknown outcome %q", res.Outcome)
 	}

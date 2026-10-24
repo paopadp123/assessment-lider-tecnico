@@ -111,9 +111,9 @@ func saveTransition(ctx context.Context, tx pgx.Tx, o order.Order, ev order.Even
 	tag, err := tx.Exec(ctx, `
 		UPDATE orders
 		SET status = $2, quote_id = $3, premium = $4::text::numeric, currency = $5, quote_valid_until = $6,
-		    payment_id = NULLIF($7, ''), failure_reason = NULLIF($8, ''), updated_at = $9
-		WHERE id = $1 AND status = $10`,
-		o.ID, o.Status, quoteID, premium, currency, validUntil, o.PaymentID, o.FailureReason, o.UpdatedAt, ev.From)
+		    payment_id = NULLIF($7, ''), failure_reason = NULLIF($8, ''), policy_number = NULLIF($9, ''), updated_at = $10
+		WHERE id = $1 AND status = $11`,
+		o.ID, o.Status, quoteID, premium, currency, validUntil, o.PaymentID, o.FailureReason, o.PolicyNumber, o.UpdatedAt, ev.From)
 	if err != nil {
 		return fmt.Errorf("update order: %w", err)
 	}
@@ -131,17 +131,17 @@ func loadOrder(ctx context.Context, q querier, where string, arg any, suffix ...
 		plate, doc                            string
 		quoteID, premium, currency, paymentID *string
 		validUntil                            *time.Time
-		failureReason                         *string
+		failureReason, policyNumber           *string
 	)
 	sql := `
 		SELECT id::text, status, plate, document_id, vehicle_year, city_code,
-		       quote_id, premium::text, currency, quote_valid_until, payment_id, failure_reason, created_at, updated_at
+		       quote_id, premium::text, currency, quote_valid_until, payment_id, failure_reason, policy_number, created_at, updated_at
 		FROM orders WHERE ` + where
 	for _, s := range suffix {
 		sql += " " + s
 	}
 	err := q.QueryRow(ctx, sql, arg).Scan(&o.ID, &o.Status, &plate, &doc, &o.VehicleYear, &o.CityCode,
-		&quoteID, &premium, &currency, &validUntil, &paymentID, &failureReason, &o.CreatedAt, &o.UpdatedAt)
+		&quoteID, &premium, &currency, &validUntil, &paymentID, &failureReason, &policyNumber, &o.CreatedAt, &o.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return order.Order{}, app.ErrOrderNotFound
 	}
@@ -164,6 +164,7 @@ func loadOrder(ctx context.Context, q querier, where string, arg any, suffix ...
 	}
 	o.PaymentID = order.PaymentID(deref(paymentID))
 	o.FailureReason = deref(failureReason)
+	o.PolicyNumber = order.PolicyNumber(deref(policyNumber))
 	return o, nil
 }
 

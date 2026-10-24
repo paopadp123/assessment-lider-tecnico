@@ -73,15 +73,17 @@ func TestWebhook_DuplicateHasNoSecondEffect(t *testing.T) {
 // Si la decisión de dominio falla por algo que no es un conflicto, no queda nada: ni el evento ni el cambio.
 func TestWebhook_ApplyErrorLeavesNoTrace(t *testing.T) {
 	repo, id := pendingOrder(t)
-	events := len(repo.events)
-	failing := func(*order.Order, PaymentEvent) (order.Event, error) { return order.Event{}, errors.New("boom") }
+	events, commands := len(repo.events), len(repo.commands)
+	failing := func(*order.Order, PaymentEvent) (order.Event, []Command, error) {
+		return order.Event{}, nil, errors.New("boom")
+	}
 
 	_, err := repo.RecordPaymentEvent(context.Background(), approved(), failing)
 
 	if err == nil {
 		t.Fatal("se esperaba error")
 	}
-	if o, _ := repo.Get(context.Background(), id); o.Status != order.PaymentPending || len(repo.events) != events || len(repo.payEvents) != 0 {
+	if o, _ := repo.Get(context.Background(), id); o.Status != order.PaymentPending || len(repo.events) != events || len(repo.payEvents) != 0 || len(repo.commands) != commands {
 		t.Fatalf("quedó rastro: status=%s eventos %d→%d eventos de pago=%d", o.Status, events, len(repo.events), len(repo.payEvents))
 	}
 }
@@ -115,5 +117,75 @@ func TestWebhook_ContradictoryEventIsAnomalyAndLoggedAsWarning(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), `"level":"WARN"`) || !strings.Contains(logs.String(), `"payment_id":"pay-1"`) {
 		t.Fatalf("falta el WARN de la anomalía: %s", logs.String())
+	}
+}
+
+// commandsFor devuelve los comandos de la outbox de un tipo para una orden.
+func commandsFor(repo *fakeRepo, id order.OrderID, typ CommandType) int {
+	n := 0
+	for _, c := range repo.commands {
+		if c.OrderID == id && c.Type == typ {
+			n++
+		}
+	}
+	return n
+}
+
+// Regla crítica: al quedar PAID se encola la emisión en la misma operación que el cambio de estado.
+func TestWebhook_ApprovedEnqueuesPolicyIssue(t *testing.T) {
+	repo, id := pendingOrder(t)
+
+	if _, err := NewHandlePaymentWebhook(repo, discardLogger()).Execute(context.Background(), approved()); err != nil {
+		t.Fatal(err)
+	}
+
+	if n := commandsFor(repo, id, CommandIssuePolicy); n != 1 {
+		t.Fatalf("comandos issue_policy = %d, want 1", n)
+	}
+}
+
+func TestWebhook_RejectedDoesNotEnqueuePolicyIssue(t *testing.T) {
+	repo, id := pendingOrder(t)
+	rejected := approved()
+	rejected.Status = order.PaymentRejected
+
+	if _, err := NewHandlePaymentWebhook(repo, discardLogger()).Execute(context.Background(), rejected); err != nil {
+		t.Fatal(err)
+	}
+
+	if n := commandsFor(repo, id, CommandIssuePolicy); n != 0 {
+		t.Fatalf("comandos issue_policy = %d; un pago rechazado no se emite", n)
+	}
+}
+
+// Un webhook duplicado no encola una segunda emisión.
+func TestWebhook_DuplicateApprovedEnqueuesIssueOnce(t *testing.T) {
+	repo, id := pendingOrder(t)
+	uc := NewHandlePaymentWebhook(repo, discardLogger())
+	for range 2 {
+		if _, err := uc.Execute(context.Background(), approved()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if n := commandsFor(repo, id, CommandIssuePolicy); n != 1 {
+		t.Fatalf("comandos issue_policy = %d, want 1", n)
+	}
+}
+
+// El otro camino a PAID: el APPROVED llegó antes de guardar PAYMENT_PENDING y se aplica al guardarlo.
+func TestEarlyApproved_EnqueuesPolicyIssueWhenAppliedLater(t *testing.T) {
+	repo, id := quotedInRepo(t)
+	if _, err := NewHandlePaymentWebhook(repo, discardLogger()).Execute(context.Background(), approved()); err != nil {
+		t.Fatal(err)
+	}
+
+	newRequestPayment(repo, &fakePSP{}, &bytes.Buffer{}).Execute(context.Background(), delivery(id, 1))
+
+	if o, _ := repo.Get(context.Background(), id); o.Status != order.Paid {
+		t.Fatalf("status = %s, want PAID", o.Status)
+	}
+	if n := commandsFor(repo, id, CommandIssuePolicy); n != 1 {
+		t.Fatalf("comandos issue_policy = %d, want 1", n)
 	}
 }

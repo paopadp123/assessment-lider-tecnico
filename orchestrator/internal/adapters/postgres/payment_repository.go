@@ -114,10 +114,11 @@ func (r *OrderRepository) RecordPaymentEvent(ctx context.Context, ev app.Payment
 }
 
 // applyEvent ejecuta la decisión de dominio y deja constancia del resultado en payment_events.
-// Un conflicto de dominio no es un error: se marca como anomalía y la orden no cambia.
+// Los comandos que dispara el cambio (p. ej. issue_policy al quedar PAID) entran a la outbox en la misma
+// transacción. Un conflicto de dominio no es un error: se marca como anomalía y la orden no cambia.
 func applyEvent(ctx context.Context, tx pgx.Tx, o *order.Order, eventID int64, ev app.PaymentEvent, apply app.ApplyPaymentFunc) (app.PaymentOutcome, error) {
 	candidate := *o
-	transition, err := apply(&candidate, ev)
+	transition, cmds, err := apply(&candidate, ev)
 	outcome := app.PaymentApplied
 	switch {
 	case errors.Is(err, order.ErrPaymentConflict):
@@ -126,6 +127,9 @@ func applyEvent(ctx context.Context, tx pgx.Tx, o *order.Order, eventID int64, e
 		return "", err
 	default:
 		if err := saveTransition(ctx, tx, candidate, transition); err != nil {
+			return "", err
+		}
+		if err := insertCommands(ctx, tx, cmds); err != nil {
 			return "", err
 		}
 		*o = candidate

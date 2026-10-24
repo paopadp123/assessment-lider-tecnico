@@ -19,6 +19,9 @@ type Quote struct {
 	ValidUntil time.Time
 }
 
+// PolicyNumber es el número de la póliza emitida.
+type PolicyNumber string
+
 // Order es una compra de póliza y su estado actual.
 type Order struct {
 	ID            OrderID
@@ -29,6 +32,7 @@ type Order struct {
 	CityCode      string
 	Quote         *Quote
 	PaymentID     PaymentID
+	PolicyNumber  PolicyNumber
 	FailureReason string
 	CreatedAt     time.Time
 	UpdatedAt     time.Time

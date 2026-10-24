@@ -19,6 +19,8 @@ const (
 	ReasonPaymentUnavailable     = "PAYMENT_UNAVAILABLE"
 	ReasonPaymentRequestRejected = "PAYMENT_REQUEST_REJECTED"
 	ReasonOrderNotFound          = "ORDER_NOT_FOUND"
+	ReasonIssueRejected          = "ISSUE_REJECTED"
+	ReasonIssuerUnavailable      = "ISSUER_UNAVAILABLE"
 )
 
 // processingBudget limita cotizar y guardar, aun desligado de la cancelación del cliente:
@@ -123,9 +125,14 @@ func isTransient(unavailable error) func(error) bool {
 }
 
 // applyPayment es la decisión de dominio que el repositorio ejecuta dentro de su transacción.
+// Una orden que queda PAID dispara la emisión de la póliza; un rechazo no dispara nada.
 func applyPayment(now func() time.Time) ApplyPaymentFunc {
-	return func(o *order.Order, ev PaymentEvent) (order.Event, error) {
-		return o.ApplyPayment(ev.Status, now())
+	return func(o *order.Order, ev PaymentEvent) (order.Event, []Command, error) {
+		applied, err := o.ApplyPayment(ev.Status, now())
+		if err != nil || o.Status != order.Paid {
+			return applied, nil, err
+		}
+		return applied, []Command{{Type: CommandIssuePolicy, OrderID: o.ID}}, nil
 	}
 }
 

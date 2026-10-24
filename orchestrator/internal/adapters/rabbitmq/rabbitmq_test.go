@@ -40,11 +40,7 @@ func testBroker(t *testing.T) (*amqp.Connection, Topology) {
 		t.Fatalf("declare: %v", err)
 	}
 	t.Cleanup(func() {
-		queues := []string{topo.PaymentQueue(), topo.DeadLetterQueue()}
-		for l := 1; l <= topo.RetryLevels; l++ {
-			queues = append(queues, topo.RetryQueue(l))
-		}
-		for _, q := range queues {
+		for _, q := range topo.Queues() {
 			_, _ = ch.QueueDelete(q, false, false, false)
 		}
 		for _, ex := range []string{topo.CommandsExchange(), topo.RetryExchange(), topo.DeadLetterExchange()} {
@@ -62,6 +58,7 @@ type scriptedHandler struct {
 	got      []app.Delivery
 	at       []time.Time
 	done     chan struct{}
+	delay    time.Duration // espera pedida en los resultados DEFERRED
 }
 
 func newScripted(outcomes ...app.CommandOutcome) *scriptedHandler {
@@ -75,7 +72,7 @@ func (h *scriptedHandler) Execute(_ context.Context, d app.Delivery) app.Command
 	h.at = append(h.at, time.Now())
 	out := h.outcomes[min(len(h.got), len(h.outcomes))-1]
 	h.done <- struct{}{}
-	return app.CommandResult{Outcome: out, Reason: "PAYMENT_UNAVAILABLE"}
+	return app.CommandResult{Outcome: out, Reason: "PAYMENT_UNAVAILABLE", Delay: h.delay}
 }
 
 func (h *scriptedHandler) wait(t *testing.T, n int) {
@@ -91,7 +88,7 @@ func (h *scriptedHandler) wait(t *testing.T, n int) {
 
 func startWorker(t *testing.T, conn *amqp.Connection, topo Topology, h CommandHandler, retryBase time.Duration) {
 	t.Helper()
-	startConfiguredWorker(t, NewWorker(conn, topo, h, slog.New(slog.NewJSONHandler(io.Discard, nil)), retryBase))
+	startConfiguredWorker(t, NewWorker(conn, topo, app.CommandRequestPayment, h, slog.New(slog.NewJSONHandler(io.Discard, nil)), retryBase))
 }
 
 func startConfiguredWorker(t *testing.T, w *Worker) {
@@ -107,12 +104,17 @@ func startConfiguredWorker(t *testing.T, w *Worker) {
 
 func publish(t *testing.T, conn *amqp.Connection, topo Topology, id string) {
 	t.Helper()
+	publishCommand(t, conn, topo, app.CommandRequestPayment, id)
+}
+
+func publishCommand(t *testing.T, conn *amqp.Connection, topo Topology, cmd app.CommandType, id string) {
+	t.Helper()
 	pub, err := NewPublisher(conn, topo)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer pub.Close()
-	msg := app.OutboxMessage{MessageID: id, Type: app.CommandRequestPayment, OrderID: "order-1"}
+	msg := app.OutboxMessage{MessageID: id, Type: cmd, OrderID: "order-1"}
 	if err := pub.Publish(context.Background(), msg); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
@@ -128,7 +130,7 @@ func getDeadLetter(t *testing.T, conn *amqp.Connection, topo Topology) amqp.Deli
 	defer ch.Close()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		d, ok, err := ch.Get(topo.DeadLetterQueue(), true)
+		d, ok, err := ch.Get(topo.DeadLetterQueue(app.CommandRequestPayment), true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -159,7 +161,7 @@ func TestRetry_RedeliversAfterBackoffWithIncrementedAttempt(t *testing.T) {
 	conn, topo := testBroker(t)
 	h := newScripted(app.CommandRetry, app.CommandRetry, app.CommandDone)
 	const delay = 300 * time.Millisecond
-	w := NewWorker(conn, topo, h, slog.New(slog.NewJSONHandler(io.Discard, nil)), delay)
+	w := NewWorker(conn, topo, app.CommandRequestPayment, h, slog.New(slog.NewJSONHandler(io.Discard, nil)), delay)
 	w.backoff = func(time.Duration, int) time.Duration { return delay } // espera fija para poder medirla
 	startConfiguredWorker(t, w)
 
@@ -201,7 +203,7 @@ func TestPoisonMessage_GoesToDLQWithoutReachingHandler(t *testing.T) {
 	startWorker(t, conn, topo, h, 10*time.Millisecond)
 	ch, _ := conn.Channel()
 	defer ch.Close()
-	if err := ch.PublishWithContext(context.Background(), topo.CommandsExchange(), paymentRoutingKey, false, false,
+	if err := ch.PublishWithContext(context.Background(), topo.CommandsExchange(), string(app.CommandRequestPayment), false, false,
 		amqp.Publishing{MessageId: "poison", Body: []byte("{no es json")}); err != nil {
 		t.Fatal(err)
 	}
@@ -226,5 +228,44 @@ func TestPublish_FailsWhenConnectionIsClosed(t *testing.T) {
 
 	if err == nil {
 		t.Fatal("se esperaba error al publicar sin canal")
+	}
+}
+
+// Cada comando llega solo a su worker: issue_policy no lo consume el worker de pagos.
+func TestIssuePolicy_IsRoutedToItsOwnQueue(t *testing.T) {
+	conn, topo := testBroker(t)
+	payments, issues := newScripted(app.CommandDone), newScripted(app.CommandDone)
+	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	startConfiguredWorker(t, NewWorker(conn, topo, app.CommandRequestPayment, payments, log, 10*time.Millisecond))
+	startConfiguredWorker(t, NewWorker(conn, topo, app.CommandIssuePolicy, issues, log, 10*time.Millisecond))
+
+	publishCommand(t, conn, topo, app.CommandIssuePolicy, "msg-issue")
+	issues.wait(t, 1)
+
+	if issues.got[0].MessageID != "msg-issue" || len(payments.got) != 0 {
+		t.Fatalf("emisión=%+v pagos=%d", issues.got, len(payments.got))
+	}
+}
+
+// Regla crítica: con el breaker abierto el comando se reprograma tras la espera pedida y SIN consumir
+// intentos: vuelve con el mismo número de intento y nunca llega a la DLQ por esta causa.
+func TestDeferred_RedeliversAfterDelayWithSameAttempt(t *testing.T) {
+	conn, topo := testBroker(t)
+	h := newScripted(app.CommandDeferred, app.CommandDeferred, app.CommandDone)
+	h.delay = 300 * time.Millisecond
+	startConfiguredWorker(t, NewWorker(conn, topo, app.CommandIssuePolicy, h, slog.New(slog.NewJSONHandler(io.Discard, nil)), 10*time.Millisecond))
+
+	publishCommand(t, conn, topo, app.CommandIssuePolicy, "msg-1")
+	h.wait(t, 3)
+
+	for i, d := range h.got {
+		if d.Attempt != 1 {
+			t.Fatalf("entrega %d con intento %d; aplazar no debe consumir intentos", i+1, d.Attempt)
+		}
+	}
+	for i := 1; i < len(h.at); i++ {
+		if gap := h.at[i].Sub(h.at[i-1]); gap < h.delay {
+			t.Fatalf("entrega %d llegó a los %v; debía esperar al menos %v", i+1, gap, h.delay)
+		}
 	}
 }
