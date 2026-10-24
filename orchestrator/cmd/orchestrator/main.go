@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/adapters/postgres"
+	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/adapters/psp"
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/adapters/quoter"
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/app"
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/httpapi"
@@ -41,6 +42,18 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	pspURL, err := requiredEnv("PSP_URL")
+	if err != nil {
+		return err
+	}
+	webhookSecret, err := requiredEnv("PSP_WEBHOOK_SECRET")
+	if err != nil {
+		return err
+	}
+	verifier, err := httpapi.NewSignatureVerifier(webhookSecret)
+	if err != nil {
+		return fmt.Errorf("PSP_WEBHOOK_SECRET: %w", err)
+	}
 
 	pool, err := pgxpool.New(ctx, dbURL)
 	if err != nil {
@@ -53,11 +66,14 @@ func run(logger *slog.Logger) error {
 
 	repo := postgres.NewOrderRepository(pool)
 	quoteClient := quoter.NewClient(quoterURL, &http.Client{})
-	createOrder := app.NewCreateOrder(repo, quoteClient, logger)
+	pspClient := psp.NewClient(pspURL, &http.Client{})
+	createOrder := app.NewCreateOrder(repo, quoteClient, pspClient, logger)
+	handlePayment := app.NewHandlePaymentWebhook(repo, logger)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", httpapi.Health)
 	httpapi.NewOrders(createOrder, repo, logger).Register(mux)
+	httpapi.NewWebhooks(handlePayment, verifier, logger).Register(mux)
 
 	addr := ":" + envOr("PORT", "8080")
 	srv := &http.Server{
@@ -65,8 +81,9 @@ func run(logger *slog.Logger) error {
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second, // corta clientes que envían el cuerpo a goteo (slowloris)
-		// Cubre el peor caso de cotización: 3 intentos de hasta 4 s más el backoff.
-		WriteTimeout: 20 * time.Second,
+		// Cubre el peor caso de cotizar y pedir el pago con sus reintentos (presupuesto de 35 s).
+		// Baja cuando las llamadas a terceros pasen a la outbox (HU-03).
+		WriteTimeout: 40 * time.Second,
 	}
 
 	errCh := make(chan error, 1)
