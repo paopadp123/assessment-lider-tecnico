@@ -122,10 +122,16 @@ func clientIP(r *http.Request) string {
 // IPRateLimiter limita los intentos por IP con un token bucket por dirección. Vive en memoria de cada réplica:
 // con N réplicas el límite efectivo es N veces mayor (documentado en el ADR 0005).
 type IPRateLimiter struct {
-	mu       sync.Mutex
-	limit    rate.Limit
-	burst    int
-	limiters map[string]*rate.Limiter
+	mu      sync.Mutex
+	limit   rate.Limit
+	burst   int
+	entries map[string]*ipEntry
+	now     func() time.Time
+}
+
+type ipEntry struct {
+	lim      *rate.Limiter
+	lastSeen time.Time
 }
 
 // maxTrackedIPs acota la memoria si llegan intentos desde muchas IP distintas.
@@ -133,36 +139,59 @@ const maxTrackedIPs = 10_000
 
 // NewIPRateLimiter permite perMinute intentos por minuto por IP.
 func NewIPRateLimiter(perMinute int) *IPRateLimiter {
-	return &IPRateLimiter{limit: rate.Every(time.Minute / time.Duration(perMinute)), burst: perMinute, limiters: map[string]*rate.Limiter{}}
+	return &IPRateLimiter{limit: rate.Every(time.Minute / time.Duration(perMinute)), burst: perMinute, entries: map[string]*ipEntry{}, now: time.Now}
 }
 
 // Allow indica si la IP puede intentar ahora y, si no, cuánto debe esperar.
 func (l *IPRateLimiter) Allow(ip string) (bool, time.Duration) {
 	l.mu.Lock()
-	lim, ok := l.limiters[ip]
+	now := l.now()
+	e, ok := l.entries[ip]
 	if !ok {
-		if len(l.limiters) >= maxTrackedIPs {
-			l.pruneIdleLocked()
-		}
-		lim = rate.NewLimiter(l.limit, l.burst)
-		l.limiters[ip] = lim
+		l.makeRoomLocked(now)
+		e = &ipEntry{lim: rate.NewLimiter(l.limit, l.burst)}
+		l.entries[ip] = e
 	}
+	e.lastSeen = now
 	l.mu.Unlock()
 
-	res := lim.Reserve()
-	if wait := res.Delay(); wait > 0 {
-		res.Cancel() // un intento rechazado no consume del cupo
+	res := e.lim.ReserveN(now, 1)
+	if wait := res.DelayFrom(now); wait > 0 {
+		res.CancelAt(now) // un intento rechazado no consume del cupo
 		return false, wait
 	}
 	return true, 0
 }
 
-// pruneIdleLocked descarta las IP con el cupo completo (sin intentos recientes): olvidarlas no cambia nada.
-// Las que están siendo frenadas se conservan, así rotar IP no le devuelve el cupo a un atacante.
-func (l *IPRateLimiter) pruneIdleLocked() {
-	for ip, lim := range l.limiters {
-		if lim.Tokens() >= float64(l.burst) {
-			delete(l.limiters, ip)
+// makeRoomLocked mantiene el registro por debajo de maxTrackedIPs. Primero descarta las IP con el cupo
+// completo (sin intentos recientes): olvidarlas no cambia nada, y las que están siendo frenadas se conservan.
+// Si todas están activas (ataque distribuido), descarta la que lleva más tiempo sin intentar: la memoria
+// queda acotada aunque esa IP recupere su cupo (hallazgo de la revisión A).
+func (l *IPRateLimiter) makeRoomLocked(now time.Time) {
+	if len(l.entries) < maxTrackedIPs {
+		return
+	}
+	for ip, e := range l.entries {
+		if e.lim.TokensAt(now) >= float64(l.burst) {
+			delete(l.entries, ip)
 		}
 	}
+	if len(l.entries) < maxTrackedIPs {
+		return
+	}
+	var oldestIP string
+	var oldest time.Time
+	for ip, e := range l.entries {
+		if oldestIP == "" || e.lastSeen.Before(oldest) {
+			oldestIP, oldest = ip, e.lastSeen
+		}
+	}
+	delete(l.entries, oldestIP)
+}
+
+// tracked devuelve cuántas IP se están siguiendo.
+func (l *IPRateLimiter) tracked() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.entries)
 }

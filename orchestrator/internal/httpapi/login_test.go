@@ -140,18 +140,50 @@ func TestRequireOperator(t *testing.T) {
 	}
 }
 
-// Con muchas IP distintas, el limitador descarta las que no tienen intentos recientes, no a todas:
-// una IP que está siendo frenada sigue frenada.
-func TestRateLimiter_PruningKeepsActiveLimits(t *testing.T) {
-	l := NewIPRateLimiter(5)
-	for range 5 {
-		l.Allow("10.0.0.1")
+// fakeClock avanza 1 µs en cada lectura: cada intento tiene su propia hora, sin depender de la resolución del
+// reloj del sistema (en Windows muchas lecturas seguidas devuelven la misma hora).
+func fakeClock() func() time.Time {
+	t := time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)
+	return func() time.Time {
+		t = t.Add(time.Microsecond)
+		return t
 	}
-	for i := range maxTrackedIPs + 10 {
-		l.Allow("192.168." + strconv.Itoa(i/256) + "." + strconv.Itoa(i%256))
+}
+
+func ipN(i int) string {
+	return "10." + strconv.Itoa(i/65536) + "." + strconv.Itoa(i/256%256) + "." + strconv.Itoa(i%256)
+}
+
+// Al llenarse el registro se descartan las IP más antiguas, no una que está siendo frenada ahora:
+// rotar IP no le devuelve el cupo a un atacante activo.
+func TestRateLimiter_EvictionKeepsRecentlyBlockedIP(t *testing.T) {
+	l := NewIPRateLimiter(5)
+	l.now = fakeClock()
+	for i := range maxTrackedIPs - 1 {
+		l.Allow(ipN(i))
+	}
+	for range 5 {
+		l.Allow("192.168.0.1")
+	}
+	for i := range 100 {
+		l.Allow(ipN(maxTrackedIPs + i)) // fuerza desalojos
 	}
 
-	if ok, _ := l.Allow("10.0.0.1"); ok {
-		t.Fatal("la IP frenada recuperó su cupo al podar el mapa")
+	if ok, _ := l.Allow("192.168.0.1"); ok {
+		t.Fatal("la IP frenada recuperó su cupo al desalojar")
+	}
+}
+
+// Hallazgo de Antigravity (revisión A): bajo un ataque distribuido todas las IP están activas y la poda no
+// libera nada. El registro igual no supera el máximo: se descarta la IP que lleva más tiempo sin intentar.
+func TestRateLimiter_NeverExceedsMaxTrackedIPs(t *testing.T) {
+	l := NewIPRateLimiter(5)
+	l.now = fakeClock()
+	for i := range maxTrackedIPs + 500 {
+		l.Allow(ipN(i)) // cada IP consume cupo: ninguna queda inactiva
+	}
+
+	if n := l.tracked(); n > maxTrackedIPs {
+		t.Fatalf("IP registradas = %d, máximo %d", n, maxTrackedIPs)
 	}
 }
