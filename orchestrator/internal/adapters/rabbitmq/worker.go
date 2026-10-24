@@ -24,6 +24,7 @@ type CommandHandler interface {
 
 // Worker consume la cola de trabajo y traduce el resultado del caso de uso a operaciones del broker:
 // DONE → ack; RETRY → copia a la cola de reintento del nivel con TTL = backoff con jitter, y ack;
+// DEFERRED → copia a la cola de aplazados con TTL = la espera pedida y el MISMO intento, y ack;
 // DEAD_LETTER → copia a la DLQ con el motivo, y ack. El ack siempre va después de que el broker confirmó
 // la copia: si el proceso muere en medio, el mensaje se reentrega (al menos una vez) y el caso de uso,
 // idempotente por estado, no repite el efecto.
@@ -116,6 +117,11 @@ func (w *Worker) handle(ctx context.Context, pub *Publisher, d amqp.Delivery) {
 		// El jitter puede dar 0; un TTL mínimo de 1 ms garantiza que el mensaje no se quede sin vencer en la cola de reintento.
 		delay := max(w.backoff(w.retryBase, attempt), time.Millisecond)
 		err = w.forward(ctx, pub, d, w.topo.RetryExchange(), retryRoutingKey(w.cmd, min(attempt, w.topo.RetryLevels)), attempt+1, res.Reason, delay)
+	case app.CommandDeferred:
+		// Aplazar no consume un intento: el tercero no se llamó (breaker abierto), así que una caída larga
+		// no termina en la DLQ. La orden sigue visible en su estado mientras espera.
+		delay := max(res.Delay, time.Millisecond)
+		err = w.forward(ctx, pub, d, w.topo.RetryExchange(), deferredRoutingKey(w.cmd), attempt, res.Reason, delay)
 	case app.CommandDeadLetter:
 		// Si esta copia falla, el mensaje se reencola; la reentrega encuentra la orden en FAILED y termina
 		// sin copia en la DLQ del broker. La fila de dead_letters (fuente para operaciones) sí quedó guardada.
