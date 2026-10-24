@@ -92,3 +92,26 @@ _Antigravity: diferida a la revisión A (diff acumulado de HU-03 a HU-05). Desde
 **Lectura.** El QA vuelve a aportar el hallazgo más caro, y otra vez por un patrón copiado de un tercero a otro (en HU-02 y HU-03 fue al revés: el QA aplicó al PSP una regla del emisor). La lección para la política de IA: una regla de mapeo de errores se decide por la consecuencia de negocio de cada tercero, no se reutiliza por parecido.
 
 _Antigravity: entra en la revisión A al cerrar HU-05._
+
+## HU-05 — Reconciliación, acciones operativas con login JWT y eventos
+
+| Hallazgo | Lo encontró | Veredicto | Acción |
+|---|---|---|---|
+| El flujo SSE avanzaba por ID sin esperar commits: un evento con ID menor que confirma tarde se saltaba para siempre, y se rompía la promesa de "reanudar sin perder nada" | QA (Haiku) | **Válido, bloqueante.** Error de diseño de Claude: asumió que el orden de los IDs es el orden de confirmación | El flujo espera ante un hueco en los IDs y lo salta solo pasado un margen (rollback). Se descartó la propuesta del QA de filtrar por `xmin` (32 bits, se rompe al dar la vuelta el contador). Pruebas nuevas del cursor |
+| Si faltaba el operador en el contexto, la acción respondía 500 en vez de 401 | QA (Haiku) | Válido, defensa en profundidad | 401, con prueba |
+| `ClaimStuck` descartaba el lote entero si fallaba la lectura de una orden ya marcada | QA (Haiku) | Válido | Devuelve las leídas y el error; el reconciliador procesa las demás |
+| El limitador de login se reiniciaba entero al llegar a 10 000 IP: rotar IP devolvía el cupo a todas | QA (Haiku) | Válido | Se podan solo las IP sin intentos recientes, con prueba |
+| Prueba de tiempo del login frágil y sin el caso del usuario inactivo | QA (Haiku) | Válido | Mediana de 5 intentos e inactivo incluido |
+| `.env.example` traía un secreto JWT y una contraseña que cumplían el largo mínimo | QA (Haiku) | Válido | Vacíos y documentados como obligatorios |
+| Latido, `WriteTimeout` del flujo y cierre al apagar sin prueba | QA (Haiku) | Válido | Pruebas de latido y de un flujo que sobrevive al `WriteTimeout`; el cierre al apagar se verificó en la prueba de humo |
+
+**Verificaciones propias antes de cualquier revisor:**
+- Se quitó a propósito el `FOR UPDATE SKIP LOCKED` de la toma de órdenes: dos reconciliadores tomaron la misma orden (3 de 3 veces).
+- Se quitó a propósito el hash ficticio del login: la prueba detectó la diferencia de tiempo (0 s vs. 59 ms), que revelaría qué usuarios existen.
+- Riesgo de diseño detectado antes de implementar: en la 3.ª ronda, el reconciliador podía marcar REFUND_REQUIRED mientras un worker emitía. Regla: si aparece la póliza, la orden pasa a ISSUED (el reverso nunca es automático).
+- Un `WriteTimeout` de 20 s habría cortado el SSE, y `Shutdown` habría esperado 25 s por los flujos abiertos: ambos se resolvieron antes de la prueba de humo.
+- La prueba de humo mostró fechas de eventos con zona local y de órdenes en UTC; se unificaron.
+
+**Lectura.** El hallazgo bloqueante es del mismo tipo que el de HU-04: una suposición que parece obvia (los IDs ordenan los commits) y que solo falla con concurrencia real. El QA acertó el problema y propuso una solución con un defecto propio; la decisión final requirió criterio humano o del modelo principal. Lección para la política de IA: el revisor detecta, pero su arreglo también se revisa.
+
+_Antigravity: revisión A (HU-03 a HU-05) al cerrar esta HU._
