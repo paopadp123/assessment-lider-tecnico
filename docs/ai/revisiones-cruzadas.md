@@ -129,3 +129,20 @@ _Antigravity: entra en la revisión A al cerrar HU-05._
 **Lo encontró el CI, no un revisor.** Después de la revisión A, el CI de Linux falló en una prueba del reconciliador. El fake marcaba las órdenes revisadas con "umbral + 1 ns" en vez de la hora actual, como hace la base (`now()`): en Windows, con un reloj de poca resolución, las dos pasadas leían la misma hora y la prueba pasaba por casualidad. Es el **cuarto fake del proyecto que no se comporta como el sistema real**. Se reprodujo la falla en un contenedor Linux con `-race` antes de corregirla, y la corrección se confirmó ahí mismo (3 corridas). Ni el QA ni Antigravity lo vieron: los dobles de prueba escritos por la IA necesitan pruebas en el mismo entorno que el CI.
 
 **Lectura.** Con preguntas acotadas y las decisiones aceptadas listadas, Antigravity no repitió hallazgos conocidos (en HU-02 aportó 1 cambio de 12) y su único hallazgo nuevo fue válido. Que el defecto viniera de la corrección de otro revisor es el punto para la política de IA: cada arreglo sugerido por una IA vuelve a pasar por revisión, y una revisión por bloque al final atrapa lo que dejaron las revisiones por HU.
+
+## HU-06 — Trazabilidad, salud y contrato OpenAPI
+
+| Hallazgo | Lo encontró | Veredicto | Acción |
+|---|---|---|---|
+| Los logs de error de los handlers HTTP y del webhook no llevaban el correlation-id, aunque estaba en el contexto (p. ej. "request failed" de `POST /orders`) | QA (Haiku) | **Válido.** Incumplía "en todos los logs" | Todos pasan por `trace.Logger`; prueba nueva en rojo primero |
+| El criterio "también en la DLQ" no tenía prueba | QA (Haiku) | Válido | Aserción del `CorrelationId` en el mensaje de la DLQ |
+| El ejemplo del contrato mostraba la placa como `***123`; el código la enmascara como `ABC***` | Claude, al revisar el hallazgo del QA sobre el formato de la placa | Válido (documentación incorrecta) | Ejemplo corregido |
+| La placa enmascarada deja ver los 3 primeros caracteres | QA (Haiku) | Decisión aceptada: el enunciado prohíbe la placa **completa**; la serie sola no identifica al vehículo y ayuda a operaciones | Sin cambio |
+| Sin backfill del correlation-id para órdenes previas | QA (Haiku) | No aplica: no hay datos de producción | Sin cambio |
+| El despachador registra la falla del lote sin correlation-id | QA (Haiku) | Aceptable: es un error del lote, no de una compra | Sin cambio |
+
+**Verificaciones propias antes de cualquier revisor:**
+- Prueba de humo con el binario y un cotizador y un PSP falsos: el PSP recibió el mismo `X-Correlation-ID` que envió el cliente, **desde el worker**, después de pasar por la outbox y RabbitMQ.
+- Mutación del contrato: al renombrar `policyNumber` en el código, la prueba de contrato falló (para eso se agregó `additionalProperties: false` a las respuestas; sin eso, un campo renombrado pasaba inadvertido).
+- Al cambiar la inserción de la outbox a `INSERT … SELECT`, Claude notó que un comando para una orden inexistente dejaría de fallar y se perdería en silencio; ahora devuelve `ErrOrderNotFound`, con prueba.
+- Todo se corrió también en Linux con `-race` antes de proponer los commits (lección de la falla del CI en HU-05).
