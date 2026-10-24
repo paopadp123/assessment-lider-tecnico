@@ -127,18 +127,40 @@ func (uc *IssuePolicy) unavailable(ctx context.Context, log *slog.Logger, d Deli
 }
 
 func (uc *IssuePolicy) markIssued(ctx context.Context, log *slog.Logger, o order.Order, number order.PolicyNumber) CommandResult {
-	o.PolicyNumber = number
-	_, err := transition(ctx, uc.repo, uc.now, o, order.Issued, "policy issued")
-	if errors.Is(err, order.ErrInvalidTransition) {
-		log.Info("order already advanced by another delivery")
-		return CommandResult{Outcome: CommandDone}
-	}
-	if err != nil {
+	if err := recordPolicy(ctx, uc.repo, uc.now, log, o, number); err != nil {
 		// La póliza ya existe en el emisor: el reintento la encuentra por externalRef y no la reemite.
 		return retry(log, "mark issued", err)
 	}
-	log.Info("policy issued", "policy_number", number)
 	return CommandResult{Outcome: CommandDone}
+}
+
+// recordPolicy registra una póliza emitida. Si mientras tanto la orden pasó a REFUND_REQUIRED (la
+// reconciliación o un operador decidieron el reverso), la póliza existente manda: la orden pasa a ISSUED
+// y queda un WARN, porque el reverso todavía no se ejecutó (no hay reembolso automático).
+func recordPolicy(ctx context.Context, repo OrderRepository, now func() time.Time, log *slog.Logger, o order.Order, number order.PolicyNumber) error {
+	o.PolicyNumber = number
+	_, err := transition(ctx, repo, now, o, order.Issued, "policy issued")
+	if !errors.Is(err, order.ErrInvalidTransition) {
+		if err == nil {
+			log.Info("policy issued", "policy_number", number)
+		}
+		return err
+	}
+
+	current, loadErr := repo.Get(ctx, o.ID)
+	if loadErr != nil {
+		return loadErr
+	}
+	if current.Status != order.RefundRequired {
+		log.Info("order already advanced by another delivery", "status", current.Status)
+		return nil
+	}
+	current.PolicyNumber, current.FailureReason = number, ""
+	if _, err := transition(ctx, repo, now, current, order.Issued, "policy found after refund was required"); err != nil {
+		return err
+	}
+	log.Warn("policy issued for an order marked for refund; refund must not be executed", "policy_number", number)
+	return nil
 }
 
 // requireRefund deja la orden en REFUND_REQUIRED para que operaciones decida el reverso.
