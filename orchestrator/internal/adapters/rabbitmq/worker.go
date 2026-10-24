@@ -89,7 +89,9 @@ func (w *Worker) handle(ctx context.Context, pub *Publisher, d amqp.Delivery) {
 	if err := json.Unmarshal(d.Body, &body); err != nil || body.OrderID == "" {
 		// Mensaje venenoso: reintentarlo no lo arregla. Sin reencolar, la cola lo envía a la DLQ.
 		log.Error("poison message sent to dead letter queue", "error", err)
-		_ = d.Nack(false, false)
+		if nackErr := d.Nack(false, false); nackErr != nil {
+			log.Error("could not reject poison message", "error", nackErr)
+		}
 		return
 	}
 
@@ -100,9 +102,12 @@ func (w *Worker) handle(ctx context.Context, pub *Publisher, d amqp.Delivery) {
 	case app.CommandDone:
 		err = d.Ack(false)
 	case app.CommandRetry:
-		err = w.forward(ctx, pub, d, w.topo.RetryExchange(), retryRoutingKey(min(attempt, w.topo.RetryLevels)), attempt+1, res.Reason,
-			w.backoff(w.retryBase, attempt))
+		// El jitter puede dar 0; un TTL mínimo de 1 ms garantiza que el mensaje no se quede sin vencer en la cola de reintento.
+		delay := max(w.backoff(w.retryBase, attempt), time.Millisecond)
+		err = w.forward(ctx, pub, d, w.topo.RetryExchange(), retryRoutingKey(min(attempt, w.topo.RetryLevels)), attempt+1, res.Reason, delay)
 	case app.CommandDeadLetter:
+		// Si esta copia falla, el mensaje se reencola; la reentrega encuentra la orden en FAILED y termina
+		// sin copia en la DLQ del broker. La fila de dead_letters (fuente para operaciones) sí quedó guardada.
 		err = w.forward(ctx, pub, d, w.topo.DeadLetterExchange(), paymentRoutingKey, attempt, res.Reason, 0)
 	default:
 		err = fmt.Errorf("unknown outcome %q", res.Outcome)
@@ -110,7 +115,10 @@ func (w *Worker) handle(ctx context.Context, pub *Publisher, d amqp.Delivery) {
 	if err != nil {
 		// No se pudo reprogramar: se devuelve a la cola para no perderlo.
 		log.Error("could not settle message, requeueing", "outcome", res.Outcome, "error", err)
-		_ = d.Nack(false, true)
+		if nackErr := d.Nack(false, true); nackErr != nil {
+			// Si tampoco se puede devolver, el broker lo reentrega al cerrarse el canal (nunca se pierde).
+			log.Error("could not requeue message", "error", nackErr)
+		}
 	}
 }
 
@@ -123,7 +131,7 @@ func (w *Worker) forward(ctx context.Context, pub *Publisher, d amqp.Delivery, e
 		Body:      d.Body,
 	}
 	if delay > 0 {
-		m.Expiration = strconv.FormatInt(max(delay.Milliseconds(), 1), 10) // TTL por mensaje en milisegundos
+		m.Expiration = strconv.FormatInt(max(delay.Milliseconds(), 1), 10) // TTL por mensaje en milisegundos; la DLQ no lleva TTL
 	}
 	if err := pub.publish(ctx, exchange, key, m); err != nil {
 		return err

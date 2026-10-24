@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
@@ -12,6 +13,10 @@ import (
 )
 
 const attemptHeader = "x-attempt"
+
+// confirmTimeout acota la espera de la confirmación del broker. Sin tope, un broker que ni confirma ni
+// cierra la conexión dejaría al despachador bloqueado con los locks de la outbox tomados.
+const confirmTimeout = 5 * time.Second
 
 type commandBody struct {
 	OrderID string `json:"orderId"`
@@ -57,6 +62,9 @@ func (p *Publisher) publish(ctx context.Context, exchange, key string, m amqp.Pu
 	m.ContentType = "application/json"
 	m.DeliveryMode = amqp.Persistent // sobrevive a un reinicio del broker
 
+	ctx, cancel := context.WithTimeout(ctx, confirmTimeout)
+	defer cancel()
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	confirm, err := p.ch.PublishWithDeferredConfirmWithContext(ctx, exchange, key, false, false, m)
@@ -65,12 +73,19 @@ func (p *Publisher) publish(ctx context.Context, exchange, key string, m amqp.Pu
 	}
 	ok, err := confirm.WaitContext(ctx)
 	if err != nil {
+		// Sin confirmación a tiempo se trata como no publicado: la outbox lo deja pendiente.
 		return fmt.Errorf("wait broker confirm: %w", err)
 	}
 	if !ok {
 		return fmt.Errorf("broker rejected message %s", m.MessageId)
 	}
 	return nil
+}
+
+// Closed avisa cuando el canal se cierra (p. ej. se cae el broker). El proceso debe terminar para que
+// el orquestador de contenedores lo reinicie, en vez de seguir intentando publicar sobre un canal muerto.
+func (p *Publisher) Closed() <-chan *amqp.Error {
+	return p.ch.NotifyClose(make(chan *amqp.Error, 1))
 }
 
 // Close cierra el canal.

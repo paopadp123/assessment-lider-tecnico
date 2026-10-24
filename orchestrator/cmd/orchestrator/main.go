@@ -126,6 +126,15 @@ func run(logger *slog.Logger) error {
 		return nil
 	})
 	g.Go(func() error { return dispatcher.Run(gctx) })
+	publisherClosed := publisher.Closed()
+	g.Go(func() error {
+		select {
+		case <-gctx.Done():
+			return nil
+		case err := <-publisherClosed:
+			return fmt.Errorf("rabbitmq publisher channel closed: %v", err)
+		}
+	})
 	g.Go(func() error { return worker.Run(gctx) })
 	g.Go(func() error {
 		<-gctx.Done()
