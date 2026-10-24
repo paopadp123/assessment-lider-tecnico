@@ -16,6 +16,11 @@ import (
 
 const uniqueViolation = "23505"
 
+// querier lo cumplen el pool y una transacción: permite leer órdenes dentro o fuera de una transacción.
+type querier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
 // OrderRepository implementa app.OrderRepository sobre PostgreSQL.
 type OrderRepository struct {
 	pool *pgxpool.Pool
@@ -83,43 +88,57 @@ func (r *OrderRepository) byIdempotencyKey(ctx context.Context, key app.Idempote
 // SaveTransition guarda el nuevo estado y su evento en la misma transacción.
 func (r *OrderRepository) SaveTransition(ctx context.Context, o order.Order, ev order.Event) error {
 	return pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
-		var quoteID, premium, currency *string
-		var validUntil *time.Time
-		if o.Quote != nil {
-			quoteID, premium, currency, validUntil = &o.Quote.ID, &o.Quote.Premium, &o.Quote.Currency, &o.Quote.ValidUntil
-		}
-		tag, err := tx.Exec(ctx, `
-			UPDATE orders
-			SET status = $2, quote_id = $3, premium = $4::text::numeric, currency = $5, quote_valid_until = $6,
-			    failure_reason = NULLIF($7, ''), updated_at = $8
-			WHERE id = $1 AND status = $9`,
-			o.ID, o.Status, quoteID, premium, currency, validUntil, o.FailureReason, o.UpdatedAt, ev.From)
-		if err != nil {
-			return fmt.Errorf("update order: %w", err)
-		}
-		// La condición sobre el estado anterior evita pisar un cambio concurrente (control optimista).
-		if tag.RowsAffected() == 0 {
-			return fmt.Errorf("%w: order %s is no longer in %s", order.ErrInvalidTransition, o.ID, ev.From)
-		}
-		return insertEvent(ctx, tx, o.ID, ev)
+		return saveTransition(ctx, tx, o, ev)
 	})
 }
 
 // Get devuelve una orden por id.
 func (r *OrderRepository) Get(ctx context.Context, id order.OrderID) (order.Order, error) {
+	return loadOrder(ctx, r.pool, "id = $1", id)
+}
+
+// saveTransition actualiza la orden solo si sigue en el estado de origen del evento (control optimista)
+// y registra el evento. Debe ejecutarse dentro de una transacción.
+func saveTransition(ctx context.Context, tx pgx.Tx, o order.Order, ev order.Event) error {
+	var quoteID, premium, currency *string
+	var validUntil *time.Time
+	if o.Quote != nil {
+		quoteID, premium, currency, validUntil = &o.Quote.ID, &o.Quote.Premium, &o.Quote.Currency, &o.Quote.ValidUntil
+	}
+	tag, err := tx.Exec(ctx, `
+		UPDATE orders
+		SET status = $2, quote_id = $3, premium = $4::text::numeric, currency = $5, quote_valid_until = $6,
+		    payment_id = NULLIF($7, ''), failure_reason = NULLIF($8, ''), updated_at = $9
+		WHERE id = $1 AND status = $10`,
+		o.ID, o.Status, quoteID, premium, currency, validUntil, o.PaymentID, o.FailureReason, o.UpdatedAt, ev.From)
+	if err != nil {
+		return fmt.Errorf("update order: %w", err)
+	}
+	// La condición sobre el estado anterior evita pisar un cambio concurrente.
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: order %s is no longer in %s", order.ErrInvalidTransition, o.ID, ev.From)
+	}
+	return insertEvent(ctx, tx, o.ID, ev)
+}
+
+// loadOrder lee una orden con el filtro indicado; suffix permite agregar "FOR UPDATE" dentro de una transacción.
+func loadOrder(ctx context.Context, q querier, where string, arg any, suffix ...string) (order.Order, error) {
 	var (
-		o                          order.Order
-		plate, doc                 string
-		quoteID, premium, currency *string
-		validUntil                 *time.Time
-		failureReason              *string
+		o                                     order.Order
+		plate, doc                            string
+		quoteID, premium, currency, paymentID *string
+		validUntil                            *time.Time
+		failureReason                         *string
 	)
-	err := r.pool.QueryRow(ctx, `
+	sql := `
 		SELECT id::text, status, plate, document_id, vehicle_year, city_code,
-		       quote_id, premium::text, currency, quote_valid_until, failure_reason, created_at, updated_at
-		FROM orders WHERE id = $1`, id,
-	).Scan(&o.ID, &o.Status, &plate, &doc, &o.VehicleYear, &o.CityCode,
-		&quoteID, &premium, &currency, &validUntil, &failureReason, &o.CreatedAt, &o.UpdatedAt)
+		       quote_id, premium::text, currency, quote_valid_until, payment_id, failure_reason, created_at, updated_at
+		FROM orders WHERE ` + where
+	for _, s := range suffix {
+		sql += " " + s
+	}
+	err := q.QueryRow(ctx, sql, arg).Scan(&o.ID, &o.Status, &plate, &doc, &o.VehicleYear, &o.CityCode,
+		&quoteID, &premium, &currency, &validUntil, &paymentID, &failureReason, &o.CreatedAt, &o.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return order.Order{}, app.ErrOrderNotFound
 	}
@@ -140,6 +159,7 @@ func (r *OrderRepository) Get(ctx context.Context, id order.OrderID) (order.Orde
 			o.Quote.ValidUntil = *validUntil
 		}
 	}
+	o.PaymentID = order.PaymentID(deref(paymentID))
 	o.FailureReason = deref(failureReason)
 	return o, nil
 }
