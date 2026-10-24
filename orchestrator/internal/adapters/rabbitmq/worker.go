@@ -61,13 +61,21 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 	defer pub.Close()
 
-	deliveries, err := ch.ConsumeWithContext(ctx, w.topo.PaymentQueue(), "", false, false, false, false, nil)
+	// Consume sin contexto a propósito: ConsumeWithContext cancela el consumidor desde otra goroutine al
+	// cancelarse el contexto, y esa cancelación compite con el Close diferido sobre el mismo canal; en CI
+	// (Linux con -race) dejó Close esperando para siempre. El apagado se hace aquí, en secuencia.
+	const consumerTag = "payment-worker"
+	deliveries, err := ch.Consume(w.topo.PaymentQueue(), consumerTag, false, false, false, false, nil)
 	if err != nil {
 		return fmt.Errorf("consume %s: %w", w.topo.PaymentQueue(), err)
 	}
 	for {
 		select {
 		case <-ctx.Done():
+			// Primero se deja de recibir; los mensajes sin ack vuelven a la cola al cerrar el canal.
+			if err := ch.Cancel(consumerTag, false); err != nil {
+				w.log.Warn("could not cancel consumer", "error", err)
+			}
 			return nil
 		case d, ok := <-deliveries:
 			if !ok {
