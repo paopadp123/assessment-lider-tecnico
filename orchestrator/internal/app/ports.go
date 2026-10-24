@@ -82,6 +82,56 @@ type PaymentEventResult struct {
 // Devuelve order.ErrPaymentConflict si el evento no corresponde al estado de la orden.
 type ApplyPaymentFunc func(o *order.Order, ev PaymentEvent) (order.Event, error)
 
+// CommandType identifica una tarea asíncrona que se publica por la outbox.
+type CommandType string
+
+// CommandRequestPayment pide la intención de pago de una orden cotizada.
+const CommandRequestPayment CommandType = "request_payment"
+
+// Command es una tarea que debe ejecutarse después de un cambio de estado. Se guarda en la outbox
+// en la misma transacción que ese cambio: o quedan los dos o ninguno.
+type Command struct {
+	Type    CommandType
+	OrderID order.OrderID
+}
+
+// OutboxMessage es un comando guardado en la outbox, pendiente de publicar.
+type OutboxMessage struct {
+	ID        int64
+	MessageID string // identificador estable del mensaje en el broker
+	Type      CommandType
+	OrderID   order.OrderID
+	Attempts  int // intentos de publicación fallidos
+}
+
+// OutboxStore es el puerto de lectura de la outbox.
+type OutboxStore interface {
+	// PublishPending bloquea hasta limit mensajes pendientes (sin bloquear a otros despachadores),
+	// llama publish por cada uno y marca como publicados los que devuelven nil. Los que fallan quedan
+	// pendientes con su error. Devuelve cuántos se publicaron.
+	PublishPending(ctx context.Context, limit int, publish func(context.Context, OutboxMessage) error) (int, error)
+}
+
+// MessagePublisher publica un mensaje en el broker y solo devuelve nil cuando el broker confirmó.
+type MessagePublisher interface {
+	Publish(ctx context.Context, msg OutboxMessage) error
+}
+
+// DeadLetter es un comando que agotó sus reintentos.
+type DeadLetter struct {
+	MessageID string
+	Type      CommandType
+	OrderID   order.OrderID
+	Attempts  int
+	Reason    string
+}
+
+// DeadLetterStore registra los comandos que agotaron reintentos, para operaciones.
+type DeadLetterStore interface {
+	// RecordDeadLetter es idempotente por MessageID.
+	RecordDeadLetter(ctx context.Context, dl DeadLetter) error
+}
+
 // IdempotencyKey asocia la clave enviada por el cliente con la huella de su solicitud.
 type IdempotencyKey struct {
 	Key         string
@@ -94,8 +144,9 @@ type OrderRepository interface {
 	// Si la clave ya existe con la misma huella, devuelve la orden existente y created=false.
 	// Si existe con otra huella, devuelve ErrIdempotencyConflict.
 	Create(ctx context.Context, key IdempotencyKey, o order.Order, ev order.Event) (saved order.Order, created bool, err error)
-	// SaveTransition guarda el nuevo estado de la orden (con su cotización o motivo de falla) y su evento en una transacción.
-	SaveTransition(ctx context.Context, o order.Order, ev order.Event) error
+	// SaveTransition guarda el nuevo estado de la orden (con su cotización o motivo de falla), su evento
+	// y los comandos a publicar por la outbox, todo en una transacción.
+	SaveTransition(ctx context.Context, o order.Order, ev order.Event, cmds ...Command) error
 	// MarkPaymentPending guarda PAYMENT_PENDING con su paymentId y, en la misma transacción y bajo un lock por pago,
 	// aplica con apply los eventos de ese pago que hayan llegado antes. Devuelve la orden final.
 	MarkPaymentPending(ctx context.Context, o order.Order, ev order.Event, apply ApplyPaymentFunc) (order.Order, error)

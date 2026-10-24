@@ -39,12 +39,20 @@ func withRetry[T any](
 			return zero, attempt, err
 		}
 		if attempt < p.maxAttempts {
-			if err := sleep(ctx, rand.N(p.baseBackoff<<(attempt-1))); err != nil {
+			if err := sleep(ctx, Backoff(p.baseBackoff, attempt)); err != nil {
 				return zero, attempt, err
 			}
 		}
 	}
 	return zero, p.maxAttempts, fmt.Errorf("after %d attempts: %w", p.maxAttempts, lastErr)
+}
+
+// Backoff es la espera antes del reintento que sigue al intento attempt (desde 1):
+// backoff exponencial con jitter completo, un valor al azar en [0, base·2^(attempt-1)).
+// El tope de 2^20 evita desbordes si attempt crece sin control.
+func Backoff(base time.Duration, attempt int) time.Duration {
+	exp := min(max(attempt-1, 0), 20)
+	return rand.N(base << exp)
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) error {

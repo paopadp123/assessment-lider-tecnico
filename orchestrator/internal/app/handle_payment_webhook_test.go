@@ -14,12 +14,12 @@ import (
 // pendingOrder deja en el repositorio una orden que espera el pago "pay-1".
 func pendingOrder(t *testing.T) (*fakeRepo, order.OrderID) {
 	t.Helper()
-	repo := newFakeRepo()
-	res, err := newUseCase(repo, &fakeQuoter{}, &fakePSP{}, &bytes.Buffer{}).Execute(context.Background(), "key-1", validInput)
-	if err != nil || res.Order.Status != order.PaymentPending {
-		t.Fatalf("preparación: status=%s err=%v", res.Order.Status, err)
+	repo, id := quotedInRepo(t)
+	newRequestPayment(repo, &fakePSP{}, &bytes.Buffer{}).Execute(context.Background(), delivery(id, 1))
+	if o, _ := repo.Get(context.Background(), id); o.Status != order.PaymentPending {
+		t.Fatalf("preparación: status=%s", o.Status)
 	}
-	return repo, res.Order.ID
+	return repo, id
 }
 
 func approved() PaymentEvent {

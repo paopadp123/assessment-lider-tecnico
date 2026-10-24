@@ -18,24 +18,20 @@ const (
 	ReasonQuoteRejected          = "QUOTE_REJECTED"
 	ReasonPaymentUnavailable     = "PAYMENT_UNAVAILABLE"
 	ReasonPaymentRequestRejected = "PAYMENT_REQUEST_REJECTED"
+	ReasonOrderNotFound          = "ORDER_NOT_FOUND"
 )
 
-// processingBudget limita cotizar, pedir el pago y guardar, aun desligado de la cancelación del cliente:
-// si un tercero o la base se congelan, la goroutine no queda colgada para siempre.
-// Cubre el peor caso de ambos terceros con sus reintentos (~25 s).
-const processingBudget = 35 * time.Second
+// processingBudget limita cotizar y guardar, aun desligado de la cancelación del cliente:
+// si el cotizador o la base se congelan, la goroutine no queda colgada para siempre.
+const processingBudget = 15 * time.Second
 
-var (
-	quotePolicy   = retryPolicy{maxAttempts: 3, attemptTimeout: 4 * time.Second, baseBackoff: 200 * time.Millisecond}
-	paymentPolicy = retryPolicy{maxAttempts: 3, attemptTimeout: 4 * time.Second, baseBackoff: 200 * time.Millisecond}
-)
+var quotePolicy = retryPolicy{maxAttempts: 3, attemptTimeout: 4 * time.Second, baseBackoff: 200 * time.Millisecond}
 
-// CreateOrder es el caso de uso que inicia una compra: crea la orden de forma idempotente,
-// la cotiza y crea la intención de pago.
+// CreateOrder es el caso de uso que inicia una compra: crea la orden de forma idempotente y la cotiza.
+// La intención de pago no se pide aquí: queda como comando en la outbox, en la misma transacción que QUOTED.
 type CreateOrder struct {
 	repo   OrderRepository
 	quoter Quoter
-	psp    PaymentGateway
 	log    *slog.Logger
 	now    func() time.Time
 	sleep  func(context.Context, time.Duration) error
@@ -48,8 +44,8 @@ type CreateOrderResult struct {
 }
 
 // NewCreateOrder arma el caso de uso con sus puertos.
-func NewCreateOrder(repo OrderRepository, quoter Quoter, psp PaymentGateway, log *slog.Logger) *CreateOrder {
-	return &CreateOrder{repo: repo, quoter: quoter, psp: psp, log: log, now: utcMicros, sleep: sleepCtx}
+func NewCreateOrder(repo OrderRepository, quoter Quoter, log *slog.Logger) *CreateOrder {
+	return &CreateOrder{repo: repo, quoter: quoter, log: log, now: utcMicros, sleep: sleepCtx}
 }
 
 // utcMicros usa la misma precisión y zona que guarda PostgreSQL: así la respuesta original
@@ -57,7 +53,7 @@ func NewCreateOrder(repo OrderRepository, quoter Quoter, psp PaymentGateway, log
 func utcMicros() time.Time { return time.Now().UTC().Truncate(time.Microsecond) }
 
 // Execute procesa la solicitud de compra identificada por idempotencyKey.
-// Una falla de un tercero no es un error de la solicitud: la orden queda en FAILED con su motivo.
+// Una falla del cotizador no es un error de la solicitud: la orden queda en FAILED con su motivo.
 func (uc *CreateOrder) Execute(ctx context.Context, idempotencyKey string, in order.NewOrderInput) (CreateOrderResult, error) {
 	o, err := order.NewOrder(in)
 	if err != nil {
@@ -77,20 +73,15 @@ func (uc *CreateOrder) Execute(ctx context.Context, idempotencyKey string, in or
 	}
 	uc.log.Info("order created", "order_id", saved.ID, "plate", saved.Plate)
 
-	// La orden ya existe: si el cliente se desconecta, el proceso debe terminar igual
-	// para no dejarla atascada, pero con un límite de tiempo propio.
+	// La orden ya existe: si el cliente se desconecta, la cotización debe terminar igual
+	// para no dejarla atascada en CREATED, pero con un límite de tiempo propio.
 	procCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), processingBudget)
 	defer cancel()
-
-	current, err := uc.quote(procCtx, saved)
-	if err != nil || current.Status != order.Quoted {
-		return CreateOrderResult{Order: current, Created: true}, err
-	}
-	current, err = uc.requestPayment(procCtx, current)
+	quoted, err := uc.quote(procCtx, saved)
 	if err != nil {
 		return CreateOrderResult{}, err
 	}
-	return CreateOrderResult{Order: current, Created: true}, nil
+	return CreateOrderResult{Order: quoted, Created: true}, nil
 }
 
 func (uc *CreateOrder) quote(ctx context.Context, o order.Order) (order.Order, error) {
@@ -102,52 +93,23 @@ func (uc *CreateOrder) quote(ctx context.Context, o order.Order) (order.Order, e
 		if errors.Is(err, ErrQuoteRejected) {
 			reason = ReasonQuoteRejected
 		}
-		return uc.fail(ctx, o, "quote failed", reason, attempts, err)
+		uc.log.Error("quote failed", "order_id", o.ID, "attempts", attempts, "reason", reason, "error", err)
+		o.FailureReason = reason
+		return transition(ctx, uc.repo, uc.now, o, order.Failed, reason)
 	}
 	o.Quote = &q
 	uc.log.Info("order quoted", "order_id", o.ID, "attempts", attempts)
-	return uc.transition(ctx, o, order.Quoted, "quote received")
+	return transition(ctx, uc.repo, uc.now, o, order.Quoted, "quote received",
+		Command{Type: CommandRequestPayment, OrderID: o.ID})
 }
 
-// requestPayment crea la intención de pago y guarda PAYMENT_PENDING. Si el PSP ya confirmó el pago
-// por webhook antes de este guardado, el repositorio lo aplica en la misma transacción.
-func (uc *CreateOrder) requestPayment(ctx context.Context, o order.Order) (order.Order, error) {
-	req := PaymentRequest{OrderID: o.ID, QuoteID: o.Quote.ID, Amount: o.Quote.Premium, Currency: o.Quote.Currency}
-	paymentID, attempts, err := withRetry(ctx, paymentPolicy, uc.sleep, isTransient(ErrPaymentUnavailable),
-		func(ctx context.Context) (order.PaymentID, error) { return uc.psp.CreatePayment(ctx, req) })
-	if err != nil {
-		reason := ReasonPaymentUnavailable
-		if errors.Is(err, ErrPaymentRequestRejected) {
-			reason = ReasonPaymentRequestRejected
-		}
-		return uc.fail(ctx, o, "payment request failed", reason, attempts, err)
-	}
-
-	o.PaymentID = paymentID
-	ev, err := o.Transition(order.PaymentPending, "payment requested", uc.now())
+// transition aplica el cambio de estado y lo guarda junto con su evento y sus comandos.
+func transition(ctx context.Context, repo OrderRepository, now func() time.Time, o order.Order, to order.Status, reason string, cmds ...Command) (order.Order, error) {
+	ev, err := o.Transition(to, reason, now())
 	if err != nil {
 		return order.Order{}, err
 	}
-	final, err := uc.repo.MarkPaymentPending(ctx, o, ev, applyPayment(uc.now))
-	if err != nil {
-		return order.Order{}, fmt.Errorf("mark payment pending: %w", err)
-	}
-	uc.log.Info("payment requested", "order_id", o.ID, "payment_id", paymentID, "attempts", attempts, "status", final.Status)
-	return final, nil
-}
-
-func (uc *CreateOrder) fail(ctx context.Context, o order.Order, msg, reason string, attempts int, cause error) (order.Order, error) {
-	uc.log.Error(msg, "order_id", o.ID, "attempts", attempts, "reason", reason, "error", cause)
-	o.FailureReason = reason
-	return uc.transition(ctx, o, order.Failed, reason)
-}
-
-func (uc *CreateOrder) transition(ctx context.Context, o order.Order, to order.Status, reason string) (order.Order, error) {
-	ev, err := o.Transition(to, reason, uc.now())
-	if err != nil {
-		return order.Order{}, err
-	}
-	if err := uc.repo.SaveTransition(ctx, o, ev); err != nil {
+	if err := repo.SaveTransition(ctx, o, ev, cmds...); err != nil {
 		return order.Order{}, fmt.Errorf("save transition to %s: %w", to, err)
 	}
 	return o, nil
