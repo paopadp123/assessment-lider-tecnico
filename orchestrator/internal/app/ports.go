@@ -32,6 +32,8 @@ var (
 	ErrIssuerCircuitOpen = errors.New("policy issuer circuit open")
 	// ErrPolicyNotFound indica que no hay póliza emitida para la referencia externa consultada.
 	ErrPolicyNotFound = errors.New("policy not found")
+	// ErrActionNotAllowed indica que la acción operativa no aplica al estado actual de la orden.
+	ErrActionNotAllowed = errors.New("action not allowed in the current order status")
 )
 
 // QuoteRequest son los datos que exige el cotizador de la aseguradora.
@@ -192,4 +194,42 @@ type OrderRepository interface {
 	RecordPaymentEvent(ctx context.Context, ev PaymentEvent, apply ApplyPaymentFunc) (PaymentEventResult, error)
 	// Get devuelve una orden por id o ErrOrderNotFound.
 	Get(ctx context.Context, id order.OrderID) (order.Order, error)
+}
+
+// StuckOrder es una orden sin avanzar desde hace más del umbral, tomada por el reconciliador.
+type StuckOrder struct {
+	Order order.Order
+	// IssueMisses son las rondas seguidas en que la consulta al emisor confirmó que la póliza no existe.
+	IssueMisses int
+}
+
+// ReconcileStore es el puerto de persistencia del reconciliador.
+type ReconcileStore interface {
+	// ClaimStuck toma hasta limit órdenes no terminales sin cambios ni reconciliación desde before y las marca
+	// como reconciladas ahora. Dos reconciliadores en paralelo nunca toman la misma orden. Si alguna no se
+	// pudo leer, devuelve las demás junto con el error.
+	ClaimStuck(ctx context.Context, before time.Time, limit int) ([]StuckOrder, error)
+	// Enqueue guarda comandos en la outbox sin cambiar el estado de la orden.
+	Enqueue(ctx context.Context, cmds ...Command) error
+	// RecordIssueMiss suma una ronda en que la póliza no existe y devuelve el total. Cualquier cambio de
+	// estado de la orden reinicia la cuenta.
+	RecordIssueMiss(ctx context.Context, id order.OrderID) (int, error)
+}
+
+// StoredEvent es un evento de la línea de tiempo ya guardado. ID es creciente: ordena todos los cambios
+// de todas las órdenes y sirve para reanudar el flujo de eventos (Last-Event-ID).
+type StoredEvent struct {
+	ID      int64
+	OrderID order.OrderID
+	order.Event
+}
+
+// EventReader lee la línea de tiempo de las órdenes.
+type EventReader interface {
+	// ListEvents devuelve los eventos de una orden en orden de ocurrencia, o ErrOrderNotFound.
+	ListEvents(ctx context.Context, id order.OrderID) ([]StoredEvent, error)
+	// EventsAfter devuelve hasta limit eventos de cualquier orden con ID mayor que afterID, en orden.
+	EventsAfter(ctx context.Context, afterID int64, limit int) ([]StoredEvent, error)
+	// LatestEventID es el ID del último evento guardado (0 si no hay ninguno).
+	LatestEventID(ctx context.Context) (int64, error)
 }

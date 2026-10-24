@@ -51,8 +51,13 @@ const (
 	openTimeout = 100 * time.Millisecond
 )
 
-func newTestBreaker(inner app.PolicyIssuer) *Breaker {
-	return NewBreaker(inner, BreakerSettings{FailureThreshold: threshold, OpenTimeout: openTimeout},
+// newTestBreaker deja el circuito abierto una hora: con un tiempo corto, una pausa de la máquina entre llamadas
+// lo pasaría a half-open y la prueba fallaría sin que el código esté mal (pasó en la suite completa).
+func newTestBreaker(inner app.PolicyIssuer) *Breaker { return newTimedBreaker(inner, time.Hour) }
+
+// newTimedBreaker es para las pruebas de half-open, que necesitan que el tiempo abierto venza.
+func newTimedBreaker(inner app.PolicyIssuer, open time.Duration) *Breaker {
+	return NewBreaker(inner, BreakerSettings{FailureThreshold: threshold, OpenTimeout: open},
 		slog.New(slog.NewJSONHandler(io.Discard, nil)))
 }
 
@@ -131,7 +136,7 @@ func TestBreaker_SuccessResetsConsecutiveFailures(t *testing.T) {
 // Pasado el tiempo abierto, deja pasar una llamada de prueba (half-open); si sale bien, se cierra.
 func TestBreaker_HalfOpenProbeClosesOnSuccess(t *testing.T) {
 	inner := &scriptedIssuer{err: app.ErrIssuerUnavailable}
-	b := newTestBreaker(inner)
+	b := newTimedBreaker(inner, openTimeout)
 	for range threshold {
 		_ = issue(b)
 	}
@@ -149,7 +154,7 @@ func TestBreaker_HalfOpenProbeClosesOnSuccess(t *testing.T) {
 // Si la llamada de prueba falla, el circuito vuelve a abrirse de inmediato.
 func TestBreaker_HalfOpenProbeReopensOnFailure(t *testing.T) {
 	inner := &scriptedIssuer{err: app.ErrIssuerUnavailable}
-	b := newTestBreaker(inner)
+	b := newTimedBreaker(inner, openTimeout)
 	for range threshold {
 		_ = issue(b)
 	}

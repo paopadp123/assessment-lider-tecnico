@@ -43,6 +43,7 @@ type Event struct {
 	From       Status
 	To         Status
 	Reason     string
+	Actor      string // operador que ejecutó la acción; vacío si la hizo el sistema
 	OccurredAt time.Time
 }
 

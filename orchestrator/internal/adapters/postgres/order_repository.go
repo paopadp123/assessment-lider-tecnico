@@ -111,13 +111,15 @@ func saveTransition(ctx context.Context, tx pgx.Tx, o order.Order, ev order.Even
 	tag, err := tx.Exec(ctx, `
 		UPDATE orders
 		SET status = $2, quote_id = $3, premium = $4::text::numeric, currency = $5, quote_valid_until = $6,
-		    payment_id = NULLIF($7, ''), failure_reason = NULLIF($8, ''), policy_number = NULLIF($9, ''), updated_at = $10
+		    payment_id = NULLIF($7, ''), failure_reason = NULLIF($8, ''), policy_number = NULLIF($9, ''), updated_at = $10,
+		    reconcile_misses = 0
 		WHERE id = $1 AND status = $11`,
 		o.ID, o.Status, quoteID, premium, currency, validUntil, o.PaymentID, o.FailureReason, o.PolicyNumber, o.UpdatedAt, ev.From)
 	if err != nil {
 		return fmt.Errorf("update order: %w", err)
 	}
-	// La condición sobre el estado anterior evita pisar un cambio concurrente.
+	// La condición sobre el estado anterior evita pisar un cambio concurrente. Cualquier cambio reinicia las
+	// rondas sin póliza que cuenta el reconciliador.
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("%w: order %s is no longer in %s", order.ErrInvalidTransition, o.ID, ev.From)
 	}
@@ -170,9 +172,9 @@ func loadOrder(ctx context.Context, q querier, where string, arg any, suffix ...
 
 func insertEvent(ctx context.Context, tx pgx.Tx, orderID order.OrderID, ev order.Event) error {
 	_, err := tx.Exec(ctx, `
-		INSERT INTO order_events (order_id, from_status, to_status, reason, occurred_at)
-		VALUES ($1, NULLIF($2, ''), $3, $4, $5)`,
-		orderID, ev.From, ev.To, ev.Reason, ev.OccurredAt)
+		INSERT INTO order_events (order_id, from_status, to_status, reason, actor, occurred_at)
+		VALUES ($1, NULLIF($2, ''), $3, $4, NULLIF($5, ''), $6)`,
+		orderID, ev.From, ev.To, ev.Reason, ev.Actor, ev.OccurredAt)
 	if err != nil {
 		return fmt.Errorf("insert order event: %w", err)
 	}

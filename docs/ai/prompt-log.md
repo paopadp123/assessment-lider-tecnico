@@ -229,3 +229,75 @@ qa-reviewer. Sin Antigravity (revisión A al cerrar HU-05). Sin commit ni push h
 
 **Qué se agregó y por qué:** el original era solo "arranca el 04". Se agregaron los requisitos del enunciado (consulta por externalRef antes de reintentar, errores en 200, REFUND_REQUIRED), el contrato limpio hacia la ACL (HU-07 aún no existe), y la regla de que los reintentos agotados no prueban una falla definitiva. El usuario resolvió la pregunta abierta: el breaker abierto no consume intentos.
 **Resultado:** HU-04 terminada: 8 paquetes en verde con integración real (PostgreSQL y RabbitMQ) y el orquestador arrancando con las colas nuevas. La regla "un timeout no autoriza a reemitir" se validó quitando la consulta a propósito (3 pruebas fallaron). Errores de la IA: (1) mapeó cualquier 4xx de la ACL a rechazo de negocio, copiando el criterio del PSP: habría dejado órdenes pagadas en REFUND_REQUIRED por un error de configuración; lo detectó el agente QA (Haiku). (2) Omitió el criterio "estado del breaker expuesto" del issue #5; lo detectó la propia IA al releer el issue antes de cerrar. (3) Dos pruebas propias mal escritas (un servidor de prueba que se colgaba y una suposición falsa sobre gobreaker), detectadas al ejecutarlas.
+
+## 2026-10-24 10:37 — [HU-05] Reconciliación, compensación, acciones operativas con login JWT y eventos
+**Herramienta:** Claude Code (skill /prompt)
+
+**Original (tal como se escribió):**
+> si h5 /prompt
+
+**Ajustes del usuario al revisar el refinado:**
+> a que te refieres con operador cual es en este caso?
+> no quiero autenticacion, podemos utilizar en ccl?
+> si con autenticacin, y si que falle definitiva a la 3 ronda
+> (al confirmar con una pregunta cerrada eligió: "Login con JWT, como en CCL")
+
+**Refinado (ejecutado):**
+```text
+[HU-05] Reconciliación, compensación, acciones operativas y eventos (issue #6)
+
+Contexto:
+- HU-01..04 mergeadas. Outbox + RabbitMQ con request_payment e issue_policy (idempotentes por estado);
+  IssuePolicy consulta por externalRef antes de reemitir. HU-04 deja órdenes en ISSUING a propósito
+  (DLQ o breaker abierto): esta HU las resuelve.
+- Pendientes heredados: CREATED si falló el guardado tras cotizar (QA HU-01); QUOTED con el pago
+  aceptado sin PAYMENT_PENDING (QA y Antigravity HU-02): se recupera reenviando request_payment con
+  Idempotency-Key = orderId.
+- El PSP no tiene endpoint de consulta: PAYMENT_PENDING no se puede verificar.
+- Enunciado: job de órdenes atascadas > N min que consulta al emisor antes de reintentar; pago aprobado
+  + emisión fallida en definitiva → REFUND_REQUIRED sin reembolso automático; acciones "reintentar
+  emisión" y "marcar para reverso" con registro de quién; línea de tiempo y actualización sin recargar.
+- Decisión del usuario: el operador se identifica con login JWT, como en la prueba CCL (ADR 0006 de CCL).
+
+Objetivo: ninguna orden queda atascada en silencio; operaciones actúa autenticado y auditado; la API
+expone la línea de tiempo y un flujo SSE.
+
+Restricciones:
+- Go, misma arquitectura. Migraciones nuevas (actor en order_events, operadores).
+- Reconciliador seguro con varias réplicas: FOR UPDATE SKIP LOCKED en lotes. N configurable (5 min).
+- Nunca emitir sin consultar por externalRef. Placa y documento nunca en claro en logs.
+- Login: POST /auth/login con bcrypt, respuesta y tiempo iguales si el usuario no existe; JWT HS256
+  corto (60 min) con sub y nombre; secreto por variable de entorno (≥ 32 bytes, validado al iniciar);
+  límite de intentos por IP. Sin roles (un solo perfil: operador) y sin registro de usuarios: el
+  primer operador se crea al iniciar desde variables de entorno.
+- Rojo → verde real; Go explicado en 3–4 líneas; ADR 0004 (reconciliación y SSE) y ADR 0005 (JWT).
+
+Criterios de aceptación (estado atascado > N min):
+1. CREATED → se vuelve a cotizar: QUOTED + request_payment, o FAILED si el cotizador rechaza.
+2. QUOTED → se reencola request_payment (mismo paymentId, sin doble cobro).
+3. PAYMENT_PENDING → solo visible como atascada (WARN), sin cambiar estado.
+4. PAID → se reencola issue_policy.
+5. ISSUING → consulta por externalRef: existe → ISSUED; no existe → se reencola issue_policy; breaker
+   abierto → nada en esta ronda. A la 3.ª ronda en que la consulta confirma que no existe →
+   REFUND_REQUIRED con motivo ISSUE_FAILED_DEFINITIVELY (decisión del usuario).
+6. Acciones (JWT obligatorio; 401 sin token o con token inválido/vencido):
+   - POST /orders/{id}/actions/retry-issuance desde ISSUING o REFUND_REQUIRED (nueva transición
+     REFUND_REQUIRED → ISSUING); reencola issue_policy, que consulta antes de emitir.
+   - POST /orders/{id}/actions/mark-for-reversal desde PAID / ISSUING → REFUND_REQUIRED.
+   - Estado inválido → 409. El operador (del token, no del cuerpo) y la acción quedan en la línea de tiempo.
+7. GET /orders/{id}/events → línea de tiempo (estado, motivo, actor, fecha). Requiere JWT.
+8. GET /events/stream (SSE, requiere JWT): cada cambio de estado; Last-Event-ID para reanudar sin
+   perder eventos; funciona con varias réplicas (lee de order_events).
+9. Pruebas: ramas del reconciliador con fakes fieles, SKIP LOCKED con dos reconciliadores (validado
+   quitando el lock), login (credenciales malas, usuario inexistente, límite), middleware (401),
+   acciones (409, auditoría) y SSE (reanudación).
+
+Fuera de alcance: la consola y su pantalla de login (HU-09), listado/filtro para la consola (HU-09),
+correlation-id y OpenAPI (HU-06), ACL y simulador (HU-07/08), roles, refresh tokens y gestión de usuarios.
+
+Formato de salida: plan corto y OK; código + pruebas en verde; ADR 0004 y 0005; QA; al cerrar, el
+prompt de la revisión A para Antigravity (HU-03 a HU-05). Sin commit ni push hasta el OK.
+```
+
+**Qué se agregó y por qué:** el original solo nombraba la HU. Se agregó qué hacer con cada estado atascado (incluidos los pendientes de QA y Antigravity de HU-01 y HU-02), que PAYMENT_PENDING solo se puede hacer visible porque el PSP no tiene consulta, la transición REFUND_REQUIRED → ISSUING para "reintentar emisión", y el login JWT. El usuario resolvió las dos dudas: falla definitiva en la 3.ª ronda e identidad con JWT. Primero dijo "no quiero autenticación" y luego eligió JWT al confirmar: la IA preguntó con opciones cerradas en lugar de suponer.
+**Resultado:** HU-05 terminada: 9 paquetes en verde con integración real y prueba de humo con el binario (login, 401 sin token, SSE en vivo, línea de tiempo con actor, 409 y el reconciliador recuperando una orden QUOTED vieja al arrancar). Validaciones por mutación: sin `SKIP LOCKED` dos reconciliadores tomaron la misma orden (3/3); sin el hash ficticio, el login reveló qué usuarios existen. Errores de la IA: (1) diseñó el SSE suponiendo que el orden de los IDs es el orden de los commits; un evento que confirma tarde se habría perdido. Lo detectó el agente QA (Haiku), cuya solución propuesta (`xmin`) también tenía un defecto, y se resolvió con espera ante huecos. (2) Dejó valores de ejemplo usables para el secreto JWT y la contraseña en `.env.example` (QA). (3) Primero propuso una cabecera sin autenticación; el usuario eligió JWT al confirmar con una pregunta cerrada.

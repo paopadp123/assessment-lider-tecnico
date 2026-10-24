@@ -92,3 +92,40 @@ _Antigravity: diferida a la revisión A (diff acumulado de HU-03 a HU-05). Desde
 **Lectura.** El QA vuelve a aportar el hallazgo más caro, y otra vez por un patrón copiado de un tercero a otro (en HU-02 y HU-03 fue al revés: el QA aplicó al PSP una regla del emisor). La lección para la política de IA: una regla de mapeo de errores se decide por la consecuencia de negocio de cada tercero, no se reutiliza por parecido.
 
 _Antigravity: entra en la revisión A al cerrar HU-05._
+
+## HU-05 — Reconciliación, acciones operativas con login JWT y eventos
+
+| Hallazgo | Lo encontró | Veredicto | Acción |
+|---|---|---|---|
+| El flujo SSE avanzaba por ID sin esperar commits: un evento con ID menor que confirma tarde se saltaba para siempre, y se rompía la promesa de "reanudar sin perder nada" | QA (Haiku) | **Válido, bloqueante.** Error de diseño de Claude: asumió que el orden de los IDs es el orden de confirmación | El flujo espera ante un hueco en los IDs y lo salta solo pasado un margen (rollback). Se descartó la propuesta del QA de filtrar por `xmin` (32 bits, se rompe al dar la vuelta el contador). Pruebas nuevas del cursor |
+| Si faltaba el operador en el contexto, la acción respondía 500 en vez de 401 | QA (Haiku) | Válido, defensa en profundidad | 401, con prueba |
+| `ClaimStuck` descartaba el lote entero si fallaba la lectura de una orden ya marcada | QA (Haiku) | Válido | Devuelve las leídas y el error; el reconciliador procesa las demás |
+| El limitador de login se reiniciaba entero al llegar a 10 000 IP: rotar IP devolvía el cupo a todas | QA (Haiku) | Válido | Se podan solo las IP sin intentos recientes, con prueba |
+| Prueba de tiempo del login frágil y sin el caso del usuario inactivo | QA (Haiku) | Válido | Mediana de 5 intentos e inactivo incluido |
+| `.env.example` traía un secreto JWT y una contraseña que cumplían el largo mínimo | QA (Haiku) | Válido | Vacíos y documentados como obligatorios |
+| Latido, `WriteTimeout` del flujo y cierre al apagar sin prueba | QA (Haiku) | Válido | Pruebas de latido y de un flujo que sobrevive al `WriteTimeout`; el cierre al apagar se verificó en la prueba de humo |
+
+**Verificaciones propias antes de cualquier revisor:**
+- Se quitó a propósito el `FOR UPDATE SKIP LOCKED` de la toma de órdenes: dos reconciliadores tomaron la misma orden (3 de 3 veces).
+- Se quitó a propósito el hash ficticio del login: la prueba detectó la diferencia de tiempo (0 s vs. 59 ms), que revelaría qué usuarios existen.
+- Riesgo de diseño detectado antes de implementar: en la 3.ª ronda, el reconciliador podía marcar REFUND_REQUIRED mientras un worker emitía. Regla: si aparece la póliza, la orden pasa a ISSUED (el reverso nunca es automático).
+- Un `WriteTimeout` de 20 s habría cortado el SSE, y `Shutdown` habría esperado 25 s por los flujos abiertos: ambos se resolvieron antes de la prueba de humo.
+- La prueba de humo mostró fechas de eventos con zona local y de órdenes en UTC; se unificaron.
+
+**Lectura.** El hallazgo bloqueante es del mismo tipo que el de HU-04: una suposición que parece obvia (los IDs ordenan los commits) y que solo falla con concurrencia real. El QA acertó el problema y propuso una solución con un defecto propio; la decisión final requirió criterio humano o del modelo principal. Lección para la política de IA: el revisor detecta, pero su arreglo también se revisa.
+
+## Revisión A de Antigravity (HU-03 a HU-05, diff acumulado de Go)
+
+**Cómo se hizo.** Una sola pasada sobre unas 2.400 líneas de código de producción (sin pruebas ni documentos), con 5 preguntas de riesgo concretas, la lista de decisiones ya aceptadas para no repetirlas y un máximo de 5 hallazgos. Reemplazó a tres revisiones por HU para ahorrar tokens (estrategia en la sección 9.2 del plan).
+
+| Pregunta / hallazgo | Veredicto | Acción |
+|---|---|---|
+| Doble emisión, orden pagada perdida, concurrencia SQL | Sin hallazgo, con argumento correcto en las tres | — |
+| Comandos duplicados si la base falla después de que el broker confirmó (y en el `ack` del worker) | Real pero **ya aceptado** (entrega "al menos una vez", ADR 0002; lo absorben la idempotencia por estado y el control optimista). Una parte del escenario es inexacta: una falla al publicar un mensaje no deshace el lote; solo un error de la base lo hace | Sin cambio |
+| El limitador de login crece sin tope si todas las IP están activas (ataque distribuido): la poda no libera nada | **Válido.** Lo introdujo Claude al corregir el hallazgo del QA sobre el mismo limitador: arregló un problema y abrió otro | Si la poda no libera espacio, se descarta la IP más antigua. Prueba nueva en rojo primero, validada con una mutación (descartar la más reciente la hace fallar) |
+
+**Efecto lateral.** Al corregirlo apareció una prueba intermitente que Claude escribió en HU-04: el breaker de prueba quedaba abierto solo 100 ms, y una pausa de la máquina durante la suite completa lo pasaba a half-open. Las pruebas que no son de half-open ahora lo dejan abierto una hora; 4 corridas completas seguidas en verde.
+
+**Lo encontró el CI, no un revisor.** Después de la revisión A, el CI de Linux falló en una prueba del reconciliador. El fake marcaba las órdenes revisadas con "umbral + 1 ns" en vez de la hora actual, como hace la base (`now()`): en Windows, con un reloj de poca resolución, las dos pasadas leían la misma hora y la prueba pasaba por casualidad. Es el **cuarto fake del proyecto que no se comporta como el sistema real**. Se reprodujo la falla en un contenedor Linux con `-race` antes de corregirla, y la corrección se confirmó ahí mismo (3 corridas). Ni el QA ni Antigravity lo vieron: los dobles de prueba escritos por la IA necesitan pruebas en el mismo entorno que el CI.
+
+**Lectura.** Con preguntas acotadas y las decisiones aceptadas listadas, Antigravity no repitió hallazgos conocidos (en HU-02 aportó 1 cambio de 12) y su único hallazgo nuevo fue válido. Que el defecto viniera de la corrección de otro revisor es el punto para la política de IA: cada arreglo sugerido por una IA vuelve a pasar por revisión, y una revisión por bloque al final atrapa lo que dejaron las revisiones por HU.

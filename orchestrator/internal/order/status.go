@@ -18,12 +18,15 @@ const (
 
 // transitions es la única fuente de verdad del flujo. Una vez pagada, la orden nunca pasa a FAILED:
 // si la emisión no se logra, queda en REFUND_REQUIRED para que operaciones decida el reverso.
+// Desde REFUND_REQUIRED operaciones puede reintentar la emisión, y si la póliza aparece (el emisor
+// terminó tarde) la orden pasa a ISSUED: como no hay reembolso automático, todavía no se devolvió nada.
 var transitions = map[Status][]Status{
 	Created:        {Quoted, Failed},
 	Quoted:         {PaymentPending, Failed},
 	PaymentPending: {Paid, Failed},
 	Paid:           {Issuing, RefundRequired},
 	Issuing:        {Issued, RefundRequired},
+	RefundRequired: {Issuing, Issued},
 }
 
 // CanTransitionTo indica si el flujo permite pasar de s a next.
