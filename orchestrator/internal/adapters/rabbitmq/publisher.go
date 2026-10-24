@@ -51,10 +51,11 @@ func (p *Publisher) Publish(ctx context.Context, msg app.OutboxMessage) error {
 		return fmt.Errorf("encode command: %w", err)
 	}
 	return p.publish(ctx, p.topo.CommandsExchange(), string(msg.Type), amqp.Publishing{
-		MessageId: msg.MessageID,
-		Type:      string(msg.Type),
-		Headers:   amqp.Table{attemptHeader: int32(1)},
-		Body:      body,
+		MessageId:     msg.MessageID,
+		CorrelationId: msg.CorrelationID, // propiedad estándar de AMQP: viaja con el mensaje en todos sus saltos
+		Type:          string(msg.Type),
+		Headers:       amqp.Table{attemptHeader: int32(1)},
+		Body:          body,
 	})
 }
 

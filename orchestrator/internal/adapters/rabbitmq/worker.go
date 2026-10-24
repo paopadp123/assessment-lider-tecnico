@@ -13,6 +13,7 @@ import (
 
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/app"
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/order"
+	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/trace"
 )
 
 const reasonHeader = "x-reason"
@@ -95,7 +96,8 @@ func (w *Worker) Run(ctx context.Context) error {
 
 func (w *Worker) handle(ctx context.Context, pub *Publisher, d amqp.Delivery) {
 	attempt := attemptOf(d)
-	log := w.log.With("message_id", d.MessageId, "attempt", attempt)
+	ctx = trace.WithID(ctx, d.CorrelationId) // el caso de uso y los terceros reciben el de la compra
+	log := trace.Logger(ctx, w.log).With("message_id", d.MessageId, "attempt", attempt)
 
 	var body commandBody
 	if err := json.Unmarshal(d.Body, &body); err != nil || body.OrderID == "" {
@@ -142,10 +144,11 @@ func (w *Worker) handle(ctx context.Context, pub *Publisher, d amqp.Delivery) {
 // forward publica una copia (con confirmación) y solo entonces confirma el original.
 func (w *Worker) forward(ctx context.Context, pub *Publisher, d amqp.Delivery, exchange, key string, attempt int, reason string, delay time.Duration) error {
 	m := amqp.Publishing{
-		MessageId: d.MessageId,
-		Type:      d.Type,
-		Headers:   amqp.Table{attemptHeader: int32(attempt), reasonHeader: reason},
-		Body:      d.Body,
+		MessageId:     d.MessageId,
+		CorrelationId: d.CorrelationId, // los reintentos y la DLQ conservan el de la compra
+		Type:          d.Type,
+		Headers:       amqp.Table{attemptHeader: int32(attempt), reasonHeader: reason},
+		Body:          d.Body,
 	}
 	if delay > 0 {
 		m.Expiration = strconv.FormatInt(max(delay.Milliseconds(), 1), 10) // TTL por mensaje en milisegundos; la DLQ no lleva TTL
