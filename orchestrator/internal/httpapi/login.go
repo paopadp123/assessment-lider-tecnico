@@ -2,9 +2,18 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"log/slog"
+	"math"
+	"net"
 	"net/http"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
+
+	"golang.org/x/time/rate"
 
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/auth"
 )
@@ -36,26 +45,124 @@ func (h *Login) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /auth/login", h.login)
 }
 
-func (h *Login) login(w http.ResponseWriter, r *http.Request) {}
+type loginRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
 
-// RequireOperator exige un token válido y deja al operador en el contexto de la solicitud.
+type loginResponse struct {
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expiresAt"`
+}
+
+func (h *Login) login(w http.ResponseWriter, r *http.Request) {
+	if ok, wait := h.limiter.Allow(clientIP(r)); !ok {
+		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(wait.Seconds()))))
+		writeJSON(w, http.StatusTooManyRequests, errorResponse{Error: "too many login attempts"})
+		return
+	}
+
+	var req loginRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid JSON body"})
+		return
+	}
+	tok, err := h.auth.Login(r.Context(), req.Username, req.Password)
+	switch {
+	case errors.Is(err, auth.ErrInvalidCredentials):
+		// Sin el usuario en el log: un intento fallido puede traer la contraseña escrita en el campo equivocado.
+		h.log.WarnContext(r.Context(), "operator login failed", "ip", clientIP(r))
+		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "invalid credentials"})
+	case err != nil:
+		h.log.ErrorContext(r.Context(), "login failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal error"})
+	default:
+		writeJSON(w, http.StatusOK, loginResponse{Token: tok.Value, ExpiresAt: tok.ExpiresAt})
+	}
+}
+
+type operatorKey struct{}
+
+// RequireOperator exige "Authorization: Bearer <token>" válido y deja al operador en el contexto. La identidad
+// de quien ejecuta una acción sale siempre de aquí, nunca del cuerpo de la solicitud.
 func RequireOperator(v TokenVerifier) func(http.HandlerFunc) http.HandlerFunc {
-	return func(next http.HandlerFunc) http.HandlerFunc { return next }
+	return func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+			if !ok || token == "" {
+				writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "missing bearer token"})
+				return
+			}
+			op, err := v.Verify(token)
+			if err != nil {
+				writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "invalid token"})
+				return
+			}
+			next(w, r.WithContext(context.WithValue(r.Context(), operatorKey{}, op)))
+		}
+	}
 }
 
 // OperatorFrom devuelve el operador autenticado de la solicitud.
 func OperatorFrom(ctx context.Context) (auth.Operator, bool) {
-	return auth.Operator{}, false
+	op, ok := ctx.Value(operatorKey{}).(auth.Operator)
+	return op, ok
 }
 
-// IPRateLimiter limita los intentos por IP.
-type IPRateLimiter struct{}
+// clientIP usa la IP de la conexión. No confía en X-Forwarded-For: cualquiera puede enviarla para saltarse el
+// límite. Detrás de un balanceador habría que leerla solo de él (ver ADR 0005).
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
 
-// NewIPRateLimiter permite perMinute intentos por minuto por IP.
-func NewIPRateLimiter(perMinute int) *IPRateLimiter { return &IPRateLimiter{} }
-
-// Allow indica si la IP puede intentar ahora y, si no, cuánto debe esperar.
-func (l *IPRateLimiter) Allow(ip string) (bool, time.Duration) { return true, 0 }
+// IPRateLimiter limita los intentos por IP con un token bucket por dirección. Vive en memoria de cada réplica:
+// con N réplicas el límite efectivo es N veces mayor (documentado en el ADR 0005).
+type IPRateLimiter struct {
+	mu       sync.Mutex
+	limit    rate.Limit
+	burst    int
+	limiters map[string]*rate.Limiter
+}
 
 // maxTrackedIPs acota la memoria si llegan intentos desde muchas IP distintas.
 const maxTrackedIPs = 10_000
+
+// NewIPRateLimiter permite perMinute intentos por minuto por IP.
+func NewIPRateLimiter(perMinute int) *IPRateLimiter {
+	return &IPRateLimiter{limit: rate.Every(time.Minute / time.Duration(perMinute)), burst: perMinute, limiters: map[string]*rate.Limiter{}}
+}
+
+// Allow indica si la IP puede intentar ahora y, si no, cuánto debe esperar.
+func (l *IPRateLimiter) Allow(ip string) (bool, time.Duration) {
+	l.mu.Lock()
+	lim, ok := l.limiters[ip]
+	if !ok {
+		if len(l.limiters) >= maxTrackedIPs {
+			l.pruneIdleLocked()
+		}
+		lim = rate.NewLimiter(l.limit, l.burst)
+		l.limiters[ip] = lim
+	}
+	l.mu.Unlock()
+
+	res := lim.Reserve()
+	if wait := res.Delay(); wait > 0 {
+		res.Cancel() // un intento rechazado no consume del cupo
+		return false, wait
+	}
+	return true, 0
+}
+
+// pruneIdleLocked descarta las IP con el cupo completo (sin intentos recientes): olvidarlas no cambia nada.
+// Las que están siendo frenadas se conservan, así rotar IP no le devuelve el cupo a un atacante.
+func (l *IPRateLimiter) pruneIdleLocked() {
+	for ip, lim := range l.limiters {
+		if lim.Tokens() >= float64(l.burst) {
+			delete(l.limiters, ip)
+		}
+	}
+}
