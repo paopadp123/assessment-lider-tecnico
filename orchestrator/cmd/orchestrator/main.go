@@ -22,6 +22,7 @@ import (
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/adapters/quoter"
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/adapters/rabbitmq"
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/app"
+	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/auth"
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/httpapi"
 )
 
@@ -63,6 +64,18 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 	issuerURL, err := requiredEnv("ISSUER_URL")
+	if err != nil {
+		return err
+	}
+	jwtSecret, err := requiredEnv("JWT_SECRET")
+	if err != nil {
+		return err
+	}
+	stuckAfter, err := durationEnv("STUCK_AFTER", 5*time.Minute)
+	if err != nil {
+		return err
+	}
+	reconcileEvery, err := durationEnv("RECONCILE_EVERY", time.Minute)
 	if err != nil {
 		return err
 	}
@@ -109,17 +122,31 @@ func run(logger *slog.Logger) error {
 		issuer.BreakerSettings{FailureThreshold: 5, OpenTimeout: issuerOpenTimeout}, logger)
 	issuePolicy := app.NewIssuePolicy(repo, repo, policyIssuer, logger, issuerOpenTimeout)
 	dispatcher := app.NewDispatcher(repo, publisher, logger)
+	reconciler := app.NewReconciler(repo, repo, quoteClient, policyIssuer, logger, stuckAfter)
+	operatorActions := app.NewOperatorActions(repo, logger)
+
+	authService, err := auth.NewService(postgres.NewOperatorRepository(pool), []byte(jwtSecret), time.Hour)
+	if err != nil {
+		return fmt.Errorf("JWT_SECRET: %w", err)
+	}
+	if err := bootstrapOperator(ctx, authService); err != nil {
+		return err
+	}
+	requireOperator := httpapi.RequireOperator(authService)
 	paymentWorker := rabbitmq.NewWorker(conn, topo, app.CommandRequestPayment, requestPayment, logger, time.Second)
 	issueWorker := rabbitmq.NewWorker(conn, topo, app.CommandIssuePolicy, issuePolicy, logger, time.Second)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", httpapi.Health)
-	mux.HandleFunc("GET /ops/breakers", httpapi.Breakers(func() httpapi.BreakerStatus {
+	mux.HandleFunc("GET /ops/breakers", requireOperator(httpapi.Breakers(func() httpapi.BreakerStatus {
 		st := policyIssuer.Status()
 		return httpapi.BreakerStatus{Name: st.Name, State: st.State, ConsecutiveFailures: st.ConsecutiveFailures}
-	}))
+	})))
 	httpapi.NewOrders(createOrder, repo, logger).Register(mux)
 	httpapi.NewWebhooks(handlePayment, verifier, logger).Register(mux)
+	httpapi.NewLogin(authService, httpapi.NewIPRateLimiter(5), logger).Register(mux)
+	ops := httpapi.NewOps(operatorActions, repo, logger)
+	ops.Register(mux, requireOperator)
 
 	addr := ":" + envOr("PORT", "8080")
 	srv := &http.Server{
@@ -127,10 +154,11 @@ func run(logger *slog.Logger) error {
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second, // corta clientes que envían el cuerpo a goteo (slowloris)
-		WriteTimeout:      20 * time.Second, // cubre la cotización con sus reintentos; el pago ya no va en la petición
+		WriteTimeout:      20 * time.Second, // cubre la cotización con sus reintentos; el flujo SSE lo desactiva para sí
 	}
+	srv.RegisterOnShutdown(ops.CloseStreams) // los flujos SSE abiertos no deben retrasar el apagado
 
-	// API, despachador de la outbox y workers de pago y emisión corren juntos en este proceso. Si cualquiera falla
+	// API, despachador de la outbox, workers de pago y emisión y reconciliador corren juntos en este proceso. Si cualquiera falla
 	// (p. ej. se cae la conexión con RabbitMQ), se detiene todo y el orquestador de contenedores lo reinicia.
 	// En producción serían despliegues separados que escalan por separado (ver ADR 0002).
 	g, gctx := errgroup.WithContext(ctx)
@@ -153,6 +181,7 @@ func run(logger *slog.Logger) error {
 	})
 	g.Go(func() error { return paymentWorker.Run(gctx) })
 	g.Go(func() error { return issueWorker.Run(gctx) })
+	g.Go(func() error { return reconciler.Run(gctx, reconcileEvery) })
 	g.Go(func() error {
 		<-gctx.Done()
 		logger.Info("shutting down")
@@ -170,6 +199,31 @@ func requiredEnv(key string) (string, error) {
 		return "", fmt.Errorf("missing required environment variable %s", key)
 	}
 	return v, nil
+}
+
+// bootstrapOperator crea el primer operador de la consola si OPS_BOOTSTRAP_USER y OPS_BOOTSTRAP_PASSWORD
+// están definidas. Si ya existe, no lo modifica.
+func bootstrapOperator(ctx context.Context, svc *auth.Service) error {
+	user, password := os.Getenv("OPS_BOOTSTRAP_USER"), os.Getenv("OPS_BOOTSTRAP_PASSWORD")
+	if user == "" && password == "" {
+		return nil
+	}
+	if err := svc.Bootstrap(ctx, user, envOr("OPS_BOOTSTRAP_NAME", user), password); err != nil {
+		return fmt.Errorf("bootstrap operator: %w", err)
+	}
+	return nil
+}
+
+func durationEnv(key string, fallback time.Duration) (time.Duration, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("%s must be a positive duration like 5m: %q", key, v)
+	}
+	return d, nil
 }
 
 func envOr(key, fallback string) string {
