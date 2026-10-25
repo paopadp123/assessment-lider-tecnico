@@ -17,6 +17,7 @@ secret() { openssl rand -hex 32; }
 password() { openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | cut -c1-20; }
 
 while IFS= read -r line || [[ -n "$line" ]]; do
+  line="${line%$'\r'}" # tolera una plantilla con fin de línea CRLF (clon en Windows)
   case "$line" in
     JWT_SECRET=) echo "JWT_SECRET=$(secret)" ;;
     PSP_WEBHOOK_SECRET=) echo "PSP_WEBHOOK_SECRET=$(secret)" ;;
