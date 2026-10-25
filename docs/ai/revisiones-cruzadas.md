@@ -163,3 +163,20 @@ _Antigravity: entra en la revisión A al cerrar HU-05._
 - Prueba de humo con el orquestador Go real: 6 compras llegaron pagadas a ISSUING (todavía sin ACL). En el camino absorbió un webhook duplicado y una cotización con JSON cortado, que reintentó.
 - Imagen Docker: arranca, el healthcheck pasa y `/chaos` tumba el emisor (`/issue` → 503).
 - La firma del webhook comparte un vector fijo con la prueba de Go (`TestSignatureVerifier_SharedVector`).
+
+## HU-07 — Capa anticorrupción de emisión (C#)
+
+| Hallazgo | Lo encontró | Veredicto | Acción |
+|---|---|---|---|
+| `E-102` ("vehículo con póliza vigente") daba un 422 definitivo sin consultar. Si un intento anterior emitió sin confirmarse, la póliza vigente es **la nuestra**, y una orden pagada y emitida terminaría en REFUND_REQUIRED | QA (Haiku) | **Válido, bloqueante** | Ante un `E-102`, la ACL consulta: si la póliza es de esta orden responde 200; si no, 422. Dos pruebas |
+| En .NET, `$` acepta un salto de línea final: `"ABC123\n"` pasaba la validación (también el correlation-id) | QA (Haiku) | **Válido, bloqueante** | `\z` en todas las expresiones; pruebas con `\n` al final |
+| La prima se enviaba como texto con 2 decimales y como número sin redondear: con más de 2 decimales, los dos campos redundantes no coincidían | QA (Haiku) | Válido | El validador exige 2 decimales como máximo |
+| Nada impedía configurar tiempos de espera que superaran los 10 s del intento del orquestador | QA (Haiku) | Válido | Validación al arrancar, con prueba |
+| Un `4xx` del legado se trataba como "no confirmado" (consulta y 503) | QA (Haiku) | Válido: un 4xx significa que no emitió | `502`, sin consulta, con prueba |
+| Una respuesta HTML con 200 podía escapar a la captura del JSON ilegible | QA (Haiku) | Válido | También se captura `NotSupportedException`, con prueba |
+| La URL de los logs de HttpClient lleva el `externalRef` | QA (Haiku) | Aceptado: es el id de la orden, no un dato personal; además esos logs quedan en Warning | Sin cambio |
+
+**Verificaciones propias antes del QA:**
+- **Prueba de humo con los 3 servicios** (orquestador + simulador + ACL): 9 de 12 compras llegaron a ISSUED. Las otras 3 fueron pagos rechazados por el caos del PSP, el comportamiento correcto. Además, el reconciliador emitió 8 órdenes que habían quedado atascadas en las pruebas de humo anteriores, sin pólizas duplicadas.
+- **"Timeout pero sí emitió" forzado al 100%** con `/chaos`, con la imagen Docker de la ACL: esperó 5 s, consultó, encontró la póliza y la compra quedó en ISSUED con una sola póliza.
+- Los logs JSON de la ACL mostraban el scope como `Dictionary`2` y 4 líneas por cada llamada HTTP. Se corrigió con un scope con plantilla y el nivel Warning para HttpClient.
