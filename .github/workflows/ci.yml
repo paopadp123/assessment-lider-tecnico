@@ -118,10 +118,43 @@ jobs:
       - name: Build
         run: npm run build
 
+  console:
+    name: Console (Next.js)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: console
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: API types up to date with the OpenAPI
+        run: npm run check:api
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
   e2e:
     name: End to end (docker compose)
     runs-on: ubuntu-latest
-    needs: [orchestrator, issuing-service, simulator]
+    needs: [orchestrator, issuing-service, simulator, console]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
