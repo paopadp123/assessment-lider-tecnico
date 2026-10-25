@@ -408,3 +408,67 @@ Refs #9 y PR abierto por Claude.
 
 **Qué se agregó y por qué:** el original solo nombraba la HU. Se agregaron los contratos que el orquestador ya consume (para que el simulador no los contradiga), la firma exacta del webhook, el orden 08 antes de 07 (el simulador define el contrato del emisor que la ACL envuelve), azar con semilla para que las pruebas de porcentajes no sean intermitentes y el endpoint /chaos para que la demo del video no dependa del reloj.
 **Resultado:** HU-08 terminada: 47 pruebas con semilla fija (rojo real primero: 36 de 44 en rojo con stubs) y prueba de humo con el orquestador real: 6 compras pagadas que absorbieron un webhook duplicado y una cotización inválida. Errores de la IA: (1) no previó que Fastify borra en silencio los campos desconocidos (`/chaos` habría aceptado un error de tipeo); lo detectó su propia prueba. (2) Dejó el build (`dist/`) sin ignorar (QA, bloqueante). (3) El webhook temprano podía retener el 202 hasta 5 s (QA).
+
+## 2026-10-24 20:45 — [HU-07] Capa anticorrupción de emisión en C#
+**Herramienta:** Claude Code (skill /prompt)
+
+**Original (tal como se escribió):**
+> ya hice el merge, HU-07 /prompt
+
+**Refinado (ejecutado):**
+```text
+[HU-07] Capa anticorrupción de emisión en C# (issue #8)
+
+Contexto:
+- El orquestador Go ya consume el contrato limpio (orchestrator/internal/adapters/issuer/client.go):
+  POST /policies {externalRef, quoteId, premium, currency, plate, documentId, vehicleYear, cityCode}
+  → 201 {policyNumber} si la emite, 200 si ya existía, 422 {code, message} si es un rechazo de negocio
+  definitivo (lleva la orden a REFUND_REQUIRED). GET /policies?externalRef={orderId} → 200 {policyNumber}
+  | 404. Cualquier otro status, error de red o cuerpo inválido es transitorio: el reintento, el circuit
+  breaker y la reconciliación ya están en Go, así que la ACL hace un solo intento (sin Polly). El
+  orquestador envía X-Correlation-ID y espera hasta 10 s por intento.
+- El emisor legado lo define el simulador (HU-08, simulator/README.md): POST /issue verboso con campos
+  redundantes; 200 {result:"OK", data:{policy}}; 200 {result:"ERROR", code} (E-100 inconsistente, E-102
+  póliza vigente, E-104 placa inválida, E-901 técnico); 200 con JSON cortado (sí emitió); respuesta a los
+  8 s (sí emitió); 503 HTML caído. GET /policies?externalRef= → {result:"OK", policies:[…]}.
+- issuing-service/ es un esqueleto .NET 10 minimal API con /health, xUnit + WebApplicationFactory,
+  analizadores con warnings como errores y job de CI.
+- Enunciado: traduce, valida y normaliza errores; los errores de negocio ocultos en 200 se vuelven
+  errores explícitos del dominio; idempotente por referencia externa; pruebas unitarias del mapeo y la
+  validación; "300 líneas impecables".
+
+Objetivo: un servicio pequeño y pulido que traduzca el contrato feo del emisor al contrato limpio que el
+Go ya usa, sin que un timeout o una respuesta ilegible produzcan una póliza duplicada ni un rechazo falso.
+
+Restricciones: .NET 10 minimal API, C# sin var, records, nullable estricto; resultado explícito del
+dominio (éxito / rechazo / falla transitoria) en vez de excepciones para el flujo normal; HttpClient
+tipado con timeout configurable; sin base de datos; logs estructurados con correlation-id y sin placa ni
+documento completos; configuración por variables de entorno.
+
+Criterios de aceptación:
+1. Validación de entrada: 400 con detalle por campo (externalRef, prima > 0, moneda ISO de 3 letras,
+   placa, documento, año, ciudad); el emisor no se llama.
+2. Mapeo limpio → feo con campos redundantes coherentes, transactionId único y requestDate
+   yyyyMMddHHmmss. Supuestos documentados: documento "CC", producto "SOAT".
+3. Idempotencia por externalRef: consulta GET /policies antes de emitir; si existe → 200 con la misma
+   póliza sin llamar a /issue; si no → POST /issue → 201.
+4. E-102 y E-104 → 422 con códigos limpios del dominio (sin repetir el mensaje del legado); E-901 → 503;
+   E-100 → 502 (decisión del usuario: es un error de mapeo de la ACL, no un rechazo del cliente, y no debe
+   llevar una orden pagada a REFUND_REQUIRED); código desconocido → 502.
+5. Timeout del emisor (~6 s) o JSON ilegible: la ACL consulta GET /policies antes de responder (decisión
+   del usuario); encontrada → 201; si no → 503. Todo dentro de los 10 s del intento del orquestador.
+6. Emisor caído (503 o sin conexión) → 503. GET /policies?externalRef= → 200 | 404 | 503.
+7. xUnit: unitarias del mapeo y de cada regla de validación; endpoints con WebApplicationFactory y un
+   HttpMessageHandler falso (idempotencia, timeout con consulta, JSON roto, caída); logs sin datos
+   sensibles.
+8. Dockerfile multi-stage; prueba de humo real orquestador + simulador + ACL hasta ISSUED.
+
+Fuera de alcance: reintentos o breaker en la ACL, docker-compose y escenarios E2E (HU-10), OpenAPI de la
+ACL.
+
+Formato de salida: rojo→verde real (stubs en test:), QA con qa-reviewer, guía de estudio, commits con
+Refs #8 y PR abierto por Claude; al cerrar, el prompt de la revisión B de Antigravity.
+```
+
+**Qué se agregó y por qué:** el original solo nombraba la HU. Se agregaron los dos contratos que la ACL une (el limpio que el Go ya consume y el feo que definió el simulador), qué status tienen consecuencias de negocio (solo el 422 lleva a REFUND_REQUIRED) y el presupuesto de tiempo del intento. El usuario decidió que E-100 sea 502 y que la ACL consulte la póliza antes de responder tras un timeout o un JSON ilegible.
+**Resultado:** HU-07 terminada: 71 pruebas xUnit (rojo real primero: 53 de 60 en rojo con stubs) y prueba de humo con los 3 servicios. Con "timeout pero sí emitió" forzado al 100%, la ACL consultó y la compra quedó en ISSUED con una sola póliza. Errores de la IA, encontrados por el QA: (1) devolvía 422 ante `E-102` sin consultar, cuando la póliza vigente podía ser la propia y la orden pagada habría ido a reembolso; (2) usó `$` en las expresiones regulares de .NET, que acepta un salto de línea final. También se corrigieron, por el QA, la prima redundante con más de 2 decimales y el presupuesto de tiempos sin validar.
