@@ -18,6 +18,45 @@ tags:
 
 paths:
   /orders:
+    get:
+      tags: [operación]
+      summary: Listado de órdenes de la consola
+      description: |
+        De la más reciente a la más antigua. `q` busca por id de orden, paymentId, número de póliza,
+        correlation-id o placa exacta. La paginación es por cursor: `nextCursor` (opaco) pide la página
+        siguiente y falta en la última.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: Uno o varios estados (repetible); sin él, todos.
+          schema:
+            type: array
+            items: { $ref: "#/components/schemas/OrderStatus" }
+          style: form
+          explode: true
+        - name: q
+          in: query
+          required: false
+          schema: { type: string, maxLength: 100 }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: Una página del listado
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OrderList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "500": { $ref: "#/components/responses/InternalError" }
     post:
       tags: [compras]
       summary: Inicia una compra (crea y cotiza la orden)
@@ -83,6 +122,28 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/OrderEvent" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /orders/{id}/calls:
+    get:
+      tags: [operación]
+      summary: Llamadas a terceros de la orden
+      description: |
+        Cada intento con el cotizador, el PSP o la capa de emisión, en orden de ocurrencia: resultado,
+        duración y el error del adaptador. Nunca incluye los cuerpos de la solicitud ni de la respuesta.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/OrderId"
+      responses:
+        "200":
+          description: Intentos en orden de ocurrencia (vacío si todavía no hubo ninguno)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ThirdPartyCall" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
         "500": { $ref: "#/components/responses/InternalError" }
@@ -365,6 +426,32 @@ components:
         failureReason: { type: string, example: QUOTE_UNAVAILABLE }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
+
+    OrderList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Order" }
+        nextCursor: { type: string, description: Falta en la última página }
+
+    ThirdPartyCall:
+      type: object
+      additionalProperties: false
+      required: [id, party, operation, outcome, durationMs, startedAt]
+      properties:
+        id: { type: integer, format: int64 }
+        party: { type: string, enum: [quoter, psp, issuer] }
+        operation: { type: string, enum: [quote, create_payment, issue, find_policy] }
+        outcome:
+          type: string
+          enum: [OK, REJECTED, UNAVAILABLE, TIMEOUT, CIRCUIT_OPEN, NOT_FOUND]
+          description: CIRCUIT_OPEN = el breaker estaba abierto y no se llamó; NOT_FOUND = la consulta confirmó que la póliza no existe
+        detail: { type: string, description: Error del adaptador (código HTTP o del emisor); falta si salió bien }
+        durationMs: { type: integer, format: int64 }
+        startedAt: { type: string, format: date-time }
 
     OrderEvent:
       type: object

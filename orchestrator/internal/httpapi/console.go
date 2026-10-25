@@ -1,12 +1,19 @@
 package httpapi
 
 import (
+	"encoding/base64"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/app"
 	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/order"
+	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/trace"
 )
 
 const (
@@ -49,17 +56,101 @@ type callResponse struct {
 	StartedAt  time.Time         `json:"startedAt"`
 }
 
-func (h *Console) list(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, orderListResponse{Items: []orderResponse{}})
+func (h *Console) list(w http.ResponseWriter, r *http.Request) {
+	f, err := parseOrderFilter(r.URL.Query())
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: err.Error()})
+		return
+	}
+	page, err := h.orders.ListOrders(r.Context(), f)
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	out := orderListResponse{Items: make([]orderResponse, 0, len(page.Orders))}
+	for _, o := range page.Orders {
+		out.Items = append(out.Items, toResponse(o))
+	}
+	if page.Next != nil {
+		out.NextCursor = encodeCursor(*page.Next)
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
-func (h *Console) listCalls(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, []callResponse{})
+// parseOrderFilter valida la consulta: ?status= (repetible), ?q=, ?limit= y ?cursor=.
+func parseOrderFilter(v url.Values) (app.OrderFilter, error) {
+	f := app.OrderFilter{Limit: defaultPageSize, Query: strings.TrimSpace(v.Get("q"))}
+	for _, s := range v["status"] {
+		st := order.Status(s)
+		if !st.Valid() {
+			return app.OrderFilter{}, fmt.Errorf("invalid status %q", s)
+		}
+		f.Statuses = append(f.Statuses, st)
+	}
+	if len(f.Query) > maxQueryLength {
+		return app.OrderFilter{}, fmt.Errorf("q must be at most %d characters", maxQueryLength)
+	}
+	if raw := v.Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > maxPageSize {
+			return app.OrderFilter{}, fmt.Errorf("limit must be between 1 and %d", maxPageSize)
+		}
+		f.Limit = n
+	}
+	if raw := v.Get("cursor"); raw != "" {
+		c, err := decodeCursor(raw)
+		if err != nil {
+			return app.OrderFilter{}, errors.New("invalid cursor")
+		}
+		f.Cursor = &c
+	}
+	return f, nil
 }
 
-// encodeCursor y decodeCursor convierten el cursor en un texto opaco para la URL.
-func encodeCursor(c app.OrderCursor) string { return "" }
+func (h *Console) listCalls(w http.ResponseWriter, r *http.Request) {
+	id, ok := orderIDFrom(w, r)
+	if !ok {
+		return
+	}
+	calls, err := h.calls.ListCalls(r.Context(), id)
+	switch {
+	case errors.Is(err, app.ErrOrderNotFound):
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "order not found"})
+	case err != nil:
+		h.internalError(w, r, err)
+	default:
+		out := make([]callResponse, 0, len(calls))
+		for _, c := range calls {
+			out = append(out, callResponse{ID: c.ID, Party: c.Party, Operation: c.Operation, Outcome: c.Outcome,
+				Detail: c.Detail, DurationMs: c.Duration.Milliseconds(), StartedAt: c.StartedAt.UTC()})
+		}
+		writeJSON(w, http.StatusOK, out)
+	}
+}
+
+func (h *Console) internalError(w http.ResponseWriter, r *http.Request, err error) {
+	trace.Logger(r.Context(), h.log).Error("request failed", "method", r.Method, "path", r.URL.Path, "error", err)
+	writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "internal error"})
+}
+
+// encodeCursor y decodeCursor convierten el cursor en un texto opaco para la URL ("<instante>|<id>" en
+// base64url). Opaco a propósito: el cliente no debe armarlo ni depender de su forma.
+func encodeCursor(c app.OrderCursor) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(c.CreatedAt.UTC().Format(time.RFC3339Nano) + "|" + string(c.ID)))
+}
 
 func decodeCursor(s string) (app.OrderCursor, error) {
-	return app.OrderCursor{ID: order.OrderID(s)}, nil
+	raw, err := base64.RawURLEncoding.DecodeString(s)
+	if err != nil {
+		return app.OrderCursor{}, err
+	}
+	at, id, ok := strings.Cut(string(raw), "|")
+	if !ok || !uuidFormat.MatchString(id) {
+		return app.OrderCursor{}, errors.New("malformed cursor")
+	}
+	t, err := time.Parse(time.RFC3339Nano, at)
+	if err != nil {
+		return app.OrderCursor{}, err
+	}
+	return app.OrderCursor{CreatedAt: t, ID: order.OrderID(id)}, nil
 }

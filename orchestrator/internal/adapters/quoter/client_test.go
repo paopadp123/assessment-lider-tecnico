@@ -41,6 +41,27 @@ func TestQuote_Success(t *testing.T) {
 	}
 }
 
+// El OrderID solo sirve para registrar la llamada: no se le envía al cotizador.
+func TestQuote_DoesNotSendOrderID(t *testing.T) {
+	var fields map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&fields); err != nil {
+			t.Errorf("cuerpo: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"quoteId":"q-1","premium":1,"currency":"COP","validUntil":"2099-11-01T00:00:00Z"}`))
+	}))
+	t.Cleanup(srv.Close)
+	withOrder := req
+	withOrder.OrderID = "4f1c2a7e-0000-4000-8000-000000000001"
+
+	if _, err := NewClient(srv.URL, srv.Client()).Quote(context.Background(), withOrder); err != nil {
+		t.Fatal(err)
+	}
+	if len(fields) != 4 || fields["orderId"] != nil || fields["OrderID"] != nil {
+		t.Errorf("campos enviados = %v, se esperaban solo plate, vehicleYear, cityCode y documentId", fields)
+	}
+}
+
 func TestQuote_ErrorClassification(t *testing.T) {
 	tests := []struct {
 		name   string

@@ -171,7 +171,8 @@ func TestListCalls(t *testing.T) {
 	if rec := call(mux, http.MethodGet, "/orders/4f1c2a7e-0000-4000-8000-0000000000ff/calls", "token-ana.perez", ""); rec.Code != http.StatusNotFound {
 		t.Errorf("orden inexistente: %d, se esperaba 404", rec.Code)
 	}
-	if rec := call(mux, http.MethodGet, "/orders/no-uuid/calls", "token-ana.perez", ""); rec.Code != http.StatusBadRequest {
-		t.Errorf("id inválido: %d, se esperaba 400", rec.Code)
+	// Igual que la línea de tiempo: un id que no es UUID no puede existir, así que es 404.
+	if rec := call(mux, http.MethodGet, "/orders/no-uuid/calls", "token-ana.perez", ""); rec.Code != http.StatusNotFound {
+		t.Errorf("id inválido: %d, se esperaba 404", rec.Code)
 	}
 }

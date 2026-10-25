@@ -126,8 +126,25 @@ func saveTransition(ctx context.Context, tx pgx.Tx, o order.Order, ev order.Even
 	return insertEvent(ctx, tx, o.ID, ev)
 }
 
+// orderColumns son las columnas que lee scanOrder, en su orden.
+const orderColumns = `id::text, status, plate, document_id, vehicle_year, city_code,
+		       quote_id, premium::text, currency, quote_valid_until, payment_id, failure_reason, policy_number, correlation_id, created_at, updated_at`
+
 // loadOrder lee una orden con el filtro indicado; suffix permite agregar "FOR UPDATE" dentro de una transacción.
 func loadOrder(ctx context.Context, q querier, where string, arg any, suffix ...string) (order.Order, error) {
+	sql := `SELECT ` + orderColumns + ` FROM orders WHERE ` + where
+	for _, s := range suffix {
+		sql += " " + s
+	}
+	o, err := scanOrder(q.QueryRow(ctx, sql, arg))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return order.Order{}, app.ErrOrderNotFound
+	}
+	return o, err
+}
+
+// scanOrder convierte una fila con orderColumns en una orden. Sirve para QueryRow y para cada fila de Query.
+func scanOrder(row pgx.Row) (order.Order, error) {
 	var (
 		o                                     order.Order
 		plate, doc                            string
@@ -136,17 +153,10 @@ func loadOrder(ctx context.Context, q querier, where string, arg any, suffix ...
 		failureReason, policyNumber           *string
 		correlationID                         *string
 	)
-	sql := `
-		SELECT id::text, status, plate, document_id, vehicle_year, city_code,
-		       quote_id, premium::text, currency, quote_valid_until, payment_id, failure_reason, policy_number, correlation_id, created_at, updated_at
-		FROM orders WHERE ` + where
-	for _, s := range suffix {
-		sql += " " + s
-	}
-	err := q.QueryRow(ctx, sql, arg).Scan(&o.ID, &o.Status, &plate, &doc, &o.VehicleYear, &o.CityCode,
+	err := row.Scan(&o.ID, &o.Status, &plate, &doc, &o.VehicleYear, &o.CityCode,
 		&quoteID, &premium, &currency, &validUntil, &paymentID, &failureReason, &policyNumber, &correlationID, &o.CreatedAt, &o.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return order.Order{}, app.ErrOrderNotFound
+		return order.Order{}, err
 	}
 	if err != nil {
 		return order.Order{}, fmt.Errorf("load order: %w", err)
