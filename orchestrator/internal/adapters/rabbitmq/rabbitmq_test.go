@@ -1,0 +1,297 @@
+package rabbitmq
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	amqp "github.com/rabbitmq/amqp091-go"
+
+	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/app"
+	"github.com/paopadp123/assessment-lider-tecnico/orchestrator/internal/trace"
+)
+
+// testBroker conecta al RabbitMQ de pruebas y declara una topología con prefijo único,
+// que se borra al terminar. Sin TEST_RABBITMQ_URL se omite en local; en CI falla.
+func testBroker(t *testing.T) (*amqp.Connection, Topology) {
+	t.Helper()
+	url := os.Getenv("TEST_RABBITMQ_URL")
+	if url == "" {
+		if os.Getenv("CI") != "" {
+			t.Fatal("TEST_RABBITMQ_URL es obligatoria en CI")
+		}
+		t.Skip("TEST_RABBITMQ_URL no definida: se omiten las pruebas de integración")
+	}
+	conn, err := amqp.Dial(url)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	topo := Topology{Prefix: fmt.Sprintf("test.%s.%d.", strings.ToLower(t.Name()), time.Now().UnixNano()), RetryLevels: 3}
+	ch, err := conn.Channel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := topo.Declare(ch); err != nil {
+		t.Fatalf("declare: %v", err)
+	}
+	t.Cleanup(func() {
+		for _, q := range topo.Queues() {
+			_, _ = ch.QueueDelete(q, false, false, false)
+		}
+		for _, ex := range []string{topo.CommandsExchange(), topo.RetryExchange(), topo.DeadLetterExchange()} {
+			_ = ch.ExchangeDelete(ex, false, false)
+		}
+		_ = conn.Close()
+	})
+	return conn, topo
+}
+
+// scriptedHandler devuelve los resultados configurados en orden y registra cada entrega con su hora.
+type scriptedHandler struct {
+	mu       sync.Mutex
+	outcomes []app.CommandOutcome
+	got      []app.Delivery
+	at       []time.Time
+	done     chan struct{}
+	delay    time.Duration // espera pedida en los resultados DEFERRED
+	corrs    []string      // correlation-id que llegó en el contexto de cada entrega
+}
+
+func newScripted(outcomes ...app.CommandOutcome) *scriptedHandler {
+	return &scriptedHandler{outcomes: outcomes, done: make(chan struct{}, 10)}
+}
+
+func (h *scriptedHandler) Execute(ctx context.Context, d app.Delivery) app.CommandResult {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.got = append(h.got, d)
+	h.corrs = append(h.corrs, trace.ID(ctx))
+	h.at = append(h.at, time.Now())
+	out := h.outcomes[min(len(h.got), len(h.outcomes))-1]
+	h.done <- struct{}{}
+	return app.CommandResult{Outcome: out, Reason: "PAYMENT_UNAVAILABLE", Delay: h.delay}
+}
+
+func (h *scriptedHandler) wait(t *testing.T, n int) {
+	t.Helper()
+	for range n {
+		select {
+		case <-h.done:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("esperaba %d entregas, llegaron %d", n, len(h.got))
+		}
+	}
+}
+
+func startWorker(t *testing.T, conn *amqp.Connection, topo Topology, h CommandHandler, retryBase time.Duration) {
+	t.Helper()
+	startConfiguredWorker(t, NewWorker(conn, topo, app.CommandRequestPayment, h, slog.New(slog.NewJSONHandler(io.Discard, nil)), retryBase))
+}
+
+func startConfiguredWorker(t *testing.T, w *Worker) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+}
+
+func publish(t *testing.T, conn *amqp.Connection, topo Topology, id string) {
+	t.Helper()
+	publishCommand(t, conn, topo, app.CommandRequestPayment, id)
+}
+
+func publishCommand(t *testing.T, conn *amqp.Connection, topo Topology, cmd app.CommandType, id string) {
+	t.Helper()
+	pub, err := NewPublisher(conn, topo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pub.Close()
+	msg := app.OutboxMessage{MessageID: id, Type: cmd, OrderID: "order-1", CorrelationID: "corr-1"}
+	if err := pub.Publish(context.Background(), msg); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+}
+
+// getDeadLetter espera el mensaje en la DLQ.
+func getDeadLetter(t *testing.T, conn *amqp.Connection, topo Topology) amqp.Delivery {
+	t.Helper()
+	ch, err := conn.Channel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ch.Close()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		d, ok, err := ch.Get(topo.DeadLetterQueue(app.CommandRequestPayment), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ok {
+			return d
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("no llegó nada a la DLQ")
+	return amqp.Delivery{}
+}
+
+func TestPublishAndConsume_DeliversCommandWithFirstAttempt(t *testing.T) {
+	conn, topo := testBroker(t)
+	h := newScripted(app.CommandDone)
+	startWorker(t, conn, topo, h, 10*time.Millisecond)
+
+	publish(t, conn, topo, "msg-1")
+	h.wait(t, 1)
+
+	if d := h.got[0]; d.MessageID != "msg-1" || d.OrderID != "order-1" || d.Attempt != 1 {
+		t.Fatalf("entrega = %+v", d)
+	}
+}
+
+// Regla crítica: una falla transitoria vuelve a la cola después de un backoff, con el intento incrementado.
+func TestRetry_RedeliversAfterBackoffWithIncrementedAttempt(t *testing.T) {
+	conn, topo := testBroker(t)
+	h := newScripted(app.CommandRetry, app.CommandRetry, app.CommandDone)
+	const delay = 300 * time.Millisecond
+	w := NewWorker(conn, topo, app.CommandRequestPayment, h, slog.New(slog.NewJSONHandler(io.Discard, nil)), delay)
+	w.backoff = func(time.Duration, int) time.Duration { return delay } // espera fija para poder medirla
+	startConfiguredWorker(t, w)
+
+	publish(t, conn, topo, "msg-1")
+	h.wait(t, 3)
+
+	for i, d := range h.got {
+		if d.Attempt != i+1 || d.MessageID != "msg-1" {
+			t.Fatalf("entrega %d = %+v", i, d)
+		}
+	}
+	// Cada reintento esperó en su cola de reintento al menos el TTL antes de volver a la cola de trabajo.
+	for i := 1; i < len(h.at); i++ {
+		if gap := h.at[i].Sub(h.at[i-1]); gap < delay {
+			t.Fatalf("entrega %d llegó a los %v; debía esperar al menos %v en la cola de reintento", i+1, gap, delay)
+		}
+	}
+}
+
+// Regla crítica: lo que agota reintentos queda en la DLQ con motivo e intentos, visible para operaciones.
+func TestDeadLetter_GoesToDLQWithReasonAndAttempts(t *testing.T) {
+	conn, topo := testBroker(t)
+	h := newScripted(app.CommandDeadLetter)
+	startWorker(t, conn, topo, h, 10*time.Millisecond)
+
+	publish(t, conn, topo, "msg-1")
+	h.wait(t, 1)
+	d := getDeadLetter(t, conn, topo)
+
+	if d.MessageId != "msg-1" || d.Headers[reasonHeader] != "PAYMENT_UNAVAILABLE" || attemptOf(d) != 1 || d.CorrelationId != "corr-1" {
+		t.Fatalf("mensaje en DLQ: id=%s headers=%v", d.MessageId, d.Headers)
+	}
+}
+
+// Un mensaje que no se puede leer no se reintenta: va directo a la DLQ sin llegar al caso de uso.
+func TestPoisonMessage_GoesToDLQWithoutReachingHandler(t *testing.T) {
+	conn, topo := testBroker(t)
+	h := newScripted(app.CommandDone)
+	startWorker(t, conn, topo, h, 10*time.Millisecond)
+	ch, _ := conn.Channel()
+	defer ch.Close()
+	if err := ch.PublishWithContext(context.Background(), topo.CommandsExchange(), string(app.CommandRequestPayment), false, false,
+		amqp.Publishing{MessageId: "poison", Body: []byte("{no es json")}); err != nil {
+		t.Fatal(err)
+	}
+
+	d := getDeadLetter(t, conn, topo)
+
+	if d.MessageId != "poison" || len(h.got) != 0 {
+		t.Fatalf("id=%s entregas al caso de uso=%d", d.MessageId, len(h.got))
+	}
+}
+
+// Si el broker no está disponible, Publish devuelve error: el despachador deja el mensaje pendiente.
+func TestPublish_FailsWhenConnectionIsClosed(t *testing.T) {
+	conn, topo := testBroker(t)
+	pub, err := NewPublisher(conn, topo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = pub.Close()
+
+	err = pub.Publish(context.Background(), app.OutboxMessage{MessageID: "m", Type: app.CommandRequestPayment, OrderID: "o"})
+
+	if err == nil {
+		t.Fatal("se esperaba error al publicar sin canal")
+	}
+}
+
+// Cada comando llega solo a su worker: issue_policy no lo consume el worker de pagos.
+func TestIssuePolicy_IsRoutedToItsOwnQueue(t *testing.T) {
+	conn, topo := testBroker(t)
+	payments, issues := newScripted(app.CommandDone), newScripted(app.CommandDone)
+	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	startConfiguredWorker(t, NewWorker(conn, topo, app.CommandRequestPayment, payments, log, 10*time.Millisecond))
+	startConfiguredWorker(t, NewWorker(conn, topo, app.CommandIssuePolicy, issues, log, 10*time.Millisecond))
+
+	publishCommand(t, conn, topo, app.CommandIssuePolicy, "msg-issue")
+	issues.wait(t, 1)
+
+	if issues.got[0].MessageID != "msg-issue" || len(payments.got) != 0 {
+		t.Fatalf("emisión=%+v pagos=%d", issues.got, len(payments.got))
+	}
+}
+
+// Regla crítica: con el breaker abierto el comando se reprograma tras la espera pedida y SIN consumir
+// intentos: vuelve con el mismo número de intento y nunca llega a la DLQ por esta causa.
+func TestDeferred_RedeliversAfterDelayWithSameAttempt(t *testing.T) {
+	conn, topo := testBroker(t)
+	h := newScripted(app.CommandDeferred, app.CommandDeferred, app.CommandDone)
+	h.delay = 300 * time.Millisecond
+	startConfiguredWorker(t, NewWorker(conn, topo, app.CommandIssuePolicy, h, slog.New(slog.NewJSONHandler(io.Discard, nil)), 10*time.Millisecond))
+
+	publishCommand(t, conn, topo, app.CommandIssuePolicy, "msg-1")
+	h.wait(t, 3)
+
+	for i, d := range h.got {
+		if d.Attempt != 1 {
+			t.Fatalf("entrega %d con intento %d; aplazar no debe consumir intentos", i+1, d.Attempt)
+		}
+	}
+	for i := 1; i < len(h.at); i++ {
+		if gap := h.at[i].Sub(h.at[i-1]); gap < h.delay {
+			t.Fatalf("entrega %d llegó a los %v; debía esperar al menos %v", i+1, gap, h.delay)
+		}
+	}
+}
+
+// El correlation-id de la compra viaja en el mensaje y llega al caso de uso en el contexto, también en los
+// reintentos (la copia a la cola de reintento lo conserva).
+func TestCorrelationID_TravelsWithTheMessageAndSurvivesRetries(t *testing.T) {
+	conn, topo := testBroker(t)
+	h := newScripted(app.CommandRetry, app.CommandDone)
+	startWorker(t, conn, topo, h, 10*time.Millisecond)
+	pub, err := NewPublisher(conn, topo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pub.Close()
+
+	if err := pub.Publish(context.Background(), app.OutboxMessage{MessageID: "msg-1", Type: app.CommandRequestPayment,
+		OrderID: "order-1", CorrelationID: "corr-1"}); err != nil {
+		t.Fatal(err)
+	}
+	h.wait(t, 2)
+
+	if h.corrs[0] != "corr-1" || h.corrs[1] != "corr-1" {
+		t.Fatalf("correlation-id en las entregas = %v", h.corrs)
+	}
+}

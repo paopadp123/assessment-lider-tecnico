@@ -1,21 +1,109 @@
 name: poliza-digital
 
+# Todo el sistema: `docker compose up --build`. Antes, crear el .env con `scripts/dev-env.sh`
+# (genera los secretos). La consola queda en http://localhost:3000.
+
 services:
   postgres:
     image: postgres:17
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-app}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?falta POSTGRES_PASSWORD en .env (corre scripts/dev-env.sh)}
       POSTGRES_DB: ${POSTGRES_DB:-policies}
     ports:
-      - "5432:5432"
+      - "5433:5432" # 5433 en el host para no chocar con un PostgreSQL local
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 10
+
+  rabbitmq:
+    image: rabbitmq:4-management
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-app}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?falta RABBITMQ_PASSWORD en .env (corre scripts/dev-env.sh)}
+    ports:
+      - "5672:5672"   # AMQP
+      - "15672:15672" # interfaz de administración (colas, reintentos y DLQ)
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+
+  # Los 3 terceros (cotizador, PSP y emisor legado) con caos configurable; se cambia en vivo con /chaos.
+  simulator:
+    build: ./simulator
+    environment:
+      PSP_WEBHOOK_SECRET: ${PSP_WEBHOOK_SECRET:?falta PSP_WEBHOOK_SECRET en .env (corre scripts/dev-env.sh)}
+      PSP_WEBHOOK_URL: http://orchestrator:8080/webhooks/payments
+      SIM_SEED: ${SIM_SEED:-42} # semilla fija: la misma secuencia de fallas en cada arranque
+    ports:
+      - "8090:8090"
+    # El healthcheck viene en su Dockerfile.
+
+  # Capa anticorrupción (C#) delante del emisor legado.
+  issuing-service:
+    build: ./issuing-service
+    environment:
+      LegacyIssuer__BaseUrl: http://simulator:8090
+    ports:
+      - "8081:8080"
+    depends_on:
+      simulator:
+        condition: service_healthy
+    healthcheck:
+      # La imagen de ASP.NET no trae curl ni wget; bash abre el socket y verifica el 200 de /health.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /health HTTP/1.0\\r\\n\\r\\n' >&3 && head -n1 <&3 | grep -q ' 200 '"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  orchestrator:
+    build: ./orchestrator
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:?falta POSTGRES_PASSWORD en .env (corre scripts/dev-env.sh)}@postgres:5432/${POSTGRES_DB:-policies}?sslmode=disable
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-app}:${RABBITMQ_PASSWORD:?falta RABBITMQ_PASSWORD en .env (corre scripts/dev-env.sh)}@rabbitmq:5672/
+      QUOTER_URL: http://simulator:8090
+      PSP_URL: http://simulator:8090
+      ISSUER_URL: http://issuing-service:8080
+      PSP_WEBHOOK_SECRET: ${PSP_WEBHOOK_SECRET:?falta PSP_WEBHOOK_SECRET en .env (corre scripts/dev-env.sh)}
+      JWT_SECRET: ${JWT_SECRET:?falta JWT_SECRET en .env (corre scripts/dev-env.sh)}
+      OPS_BOOTSTRAP_USER: ${OPS_BOOTSTRAP_USER:-}
+      OPS_BOOTSTRAP_NAME: ${OPS_BOOTSTRAP_NAME:-}
+      OPS_BOOTSTRAP_PASSWORD: ${OPS_BOOTSTRAP_PASSWORD:-}
+      # Valores cortos para la demo y los escenarios; en producción serían minutos.
+      STUCK_AFTER: ${STUCK_AFTER:-30s}
+      RECONCILE_EVERY: ${RECONCILE_EVERY:-5s}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      simulator:
+        condition: service_healthy
+      issuing-service:
+        condition: service_healthy
+    restart: on-failure # si se cae RabbitMQ el proceso termina a propósito y se levanta de nuevo
+    # El healthcheck (/health/ready) viene en su Dockerfile.
+
+  # Consola de operaciones (Next.js). El navegador solo habla con ella; ella le habla al orquestador (BFF).
+  console:
+    build: ./console
+    environment:
+      ORCHESTRATOR_URL: http://orchestrator:8080
+    ports:
+      - "3000:3000"
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    # El healthcheck (/api/health) viene en su Dockerfile.
 
 volumes:
   pgdata:

@@ -1,4 +1,4 @@
-// UserPromptSubmit: guarda cada prompt real, tal como se escribió, en docs/ai/prompts-raw.md.
+// UserPromptSubmit: guarda cada prompt real, tal como se escribió, en docs/ai/prompts-raw.md (solo local, ignorado por git).
 // Insumo de la bitácora de prompts del Reporte de IA. Enmascara secretos evidentes.
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -13,7 +13,10 @@ process.stdin.on("data", (chunk) => (raw += chunk));
 process.stdin.on("end", () => {
   try {
     const { prompt = "", cwd = process.cwd() } = JSON.parse(raw);
-    if (!prompt.trim()) return;
+    // "#nolog" en el mensaje lo deja fuera de la bitácora (notas personales, dudas de estudio).
+    if (!prompt.trim() || /#nolog\b/i.test(prompt)) return;
+    // Los informes de subagentes llegan por el mismo canal, pero no son prompts escritos por la persona.
+    if (prompt.trimStart().startsWith("<agent-message")) return;
 
     let clean = prompt;
     for (const pattern of SECRET_PATTERNS) clean = clean.replace(pattern, "<REDACTADO>");

@@ -1,16 +1,16 @@
 using System.Net;
-using Microsoft.AspNetCore.Mvc.Testing;
+using Issuing.UnitTests.Support;
 
 namespace Issuing.UnitTests;
 
 /// <summary>Verifica que el servicio arranca y responde la sonda de vida.</summary>
-public sealed class HealthEndpointTests(WebApplicationFactory<Program> factory)
-    : IClassFixture<WebApplicationFactory<Program>>
+public sealed class HealthEndpointTests
 {
     [Fact]
     public async Task Health_ReturnsOk()
     {
-        using HttpClient client = factory.CreateClient();
+        using IssuingApp app = new();
+        using HttpClient client = app.CreateClient();
 
         using HttpResponseMessage response = await client.GetAsync(new Uri("/health", UriKind.Relative));
 
