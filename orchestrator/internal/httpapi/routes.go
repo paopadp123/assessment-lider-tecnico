@@ -20,6 +20,7 @@ type Handlers struct {
 	Webhooks *Webhooks
 	Login    *Login
 	Ops      *Ops
+	Console  *Console
 	Breakers http.HandlerFunc
 	Ready    http.HandlerFunc
 	Require  func(http.HandlerFunc) http.HandlerFunc
@@ -37,6 +38,7 @@ func Routes(r Router, h Handlers) {
 	h.Webhooks.Register(r)
 	h.Login.Register(r)
 	h.Ops.Register(r, h.Require)
+	h.Console.Register(r, h.Require)
 }
 
 // WithCorrelation asegura que cada solicitud tenga un correlation-id: usa el del cliente si es válido o

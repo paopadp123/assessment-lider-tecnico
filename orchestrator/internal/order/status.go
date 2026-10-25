@@ -39,5 +39,14 @@ func (s Status) CanTransitionTo(next Status) bool {
 	return false
 }
 
+// Valid indica si s es uno de los estados del flujo (p. ej. para validar un filtro que llega por la URL).
+func (s Status) Valid() bool {
+	switch s {
+	case Created, Quoted, PaymentPending, Paid, Issuing, Issued, Failed, RefundRequired:
+		return true
+	}
+	return false
+}
+
 // IsTerminal indica si la orden ya no admite cambios de estado.
 func (s Status) IsTerminal() bool { return len(transitions[s]) == 0 }

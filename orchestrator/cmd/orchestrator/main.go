@@ -110,16 +110,18 @@ func run(logger *slog.Logger) error {
 	defer publisher.Close()
 
 	repo := postgres.NewOrderRepository(pool)
-	quoteClient := quoter.NewClient(quoterURL, &http.Client{})
-	pspClient := psp.NewClient(pspURL, &http.Client{})
+	// Cada intento con un tercero queda registrado para la consola (ver app/call_recording.go).
+	quoteClient := app.NewRecordingQuoter(quoter.NewClient(quoterURL, &http.Client{}), repo, logger)
+	pspClient := app.NewRecordingPaymentGateway(psp.NewClient(pspURL, &http.Client{}), repo, logger)
 	createOrder := app.NewCreateOrder(repo, quoteClient, logger)
 	handlePayment := app.NewHandlePaymentWebhook(repo, logger)
 	requestPayment := app.NewRequestPayment(repo, repo, pspClient, logger)
 	// El breaker se abre tras 5 fallas seguidas y prueba de nuevo a los 30 s. Las emisiones que llegan con el
 	// circuito abierto esperan en la cola ese mismo tiempo, sin consumir intentos (ver ADR 0003).
 	const issuerOpenTimeout = 30 * time.Second
-	policyIssuer := issuer.NewBreaker(issuer.NewClient(issuerURL, &http.Client{}),
+	breaker := issuer.NewBreaker(issuer.NewClient(issuerURL, &http.Client{}),
 		issuer.BreakerSettings{FailureThreshold: 5, OpenTimeout: issuerOpenTimeout}, logger)
+	policyIssuer := app.NewRecordingPolicyIssuer(breaker, repo, logger) // por fuera del breaker: registra también CIRCUIT_OPEN
 	issuePolicy := app.NewIssuePolicy(repo, repo, policyIssuer, logger, issuerOpenTimeout)
 	dispatcher := app.NewDispatcher(repo, publisher, logger)
 	reconciler := app.NewReconciler(repo, repo, quoteClient, policyIssuer, logger, stuckAfter)
@@ -143,8 +145,9 @@ func run(logger *slog.Logger) error {
 		Webhooks: httpapi.NewWebhooks(handlePayment, verifier, logger),
 		Login:    httpapi.NewLogin(authService, httpapi.NewIPRateLimiter(5), logger),
 		Ops:      ops,
+		Console:  httpapi.NewConsole(repo, repo, logger),
 		Breakers: httpapi.Breakers(func() httpapi.BreakerStatus {
-			st := policyIssuer.Status()
+			st := breaker.Status()
 			return httpapi.BreakerStatus{Name: st.Name, State: st.State, ConsecutiveFailures: st.ConsecutiveFailures}
 		}),
 		// Listo = la base responde y la conexión con RabbitMQ sigue abierta. Si no, el balanceador deja de

@@ -54,7 +54,8 @@ type quoteResponse struct {
 // Quote solicita la cotización. 5xx, 429, errores de red y respuestas inválidas son ErrQuoteUnavailable
 // (se reintentan); el resto de 4xx es ErrQuoteRejected (reintentar no cambia el resultado).
 func (c *Client) Quote(ctx context.Context, req app.QuoteRequest) (order.Quote, error) {
-	body, err := json.Marshal(quoteRequest(req))
+	// Campo por campo: OrderID es interno y no se le envía al cotizador.
+	body, err := json.Marshal(quoteRequest{Plate: req.Plate, VehicleYear: req.VehicleYear, CityCode: req.CityCode, DocumentID: req.DocumentID})
 	if err != nil {
 		return order.Quote{}, fmt.Errorf("encode quote request: %w", err)
 	}

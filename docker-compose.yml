@@ -1,7 +1,7 @@
 name: poliza-digital
 
-# Todo el backend: `docker compose up --build`. Antes, crear el .env con `scripts/dev-env.sh`
-# (genera los secretos). La consola se agrega en HU-09.
+# Todo el sistema: `docker compose up --build`. Antes, crear el .env con `scripts/dev-env.sh`
+# (genera los secretos). La consola queda en http://localhost:3000.
 
 services:
   postgres:
@@ -92,6 +92,18 @@ services:
         condition: service_healthy
     restart: on-failure # si se cae RabbitMQ el proceso termina a propósito y se levanta de nuevo
     # El healthcheck (/health/ready) viene en su Dockerfile.
+
+  # Consola de operaciones (Next.js). El navegador solo habla con ella; ella le habla al orquestador (BFF).
+  console:
+    build: ./console
+    environment:
+      ORCHESTRATOR_URL: http://orchestrator:8080
+    ports:
+      - "3000:3000"
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    # El healthcheck (/api/health) viene en su Dockerfile.
 
 volumes:
   pgdata:

@@ -38,6 +38,7 @@ var (
 
 // QuoteRequest son los datos que exige el cotizador de la aseguradora.
 type QuoteRequest struct {
+	OrderID     order.OrderID // no se envía al cotizador: sirve para registrar la llamada (ThirdPartyCall)
 	Plate       string
 	VehicleYear int
 	CityCode    string
@@ -234,4 +235,90 @@ type EventReader interface {
 	EventsAfter(ctx context.Context, afterID int64, limit int) ([]StoredEvent, error)
 	// LatestEventID es el ID del último evento guardado (0 si no hay ninguno).
 	LatestEventID(ctx context.Context) (int64, error)
+}
+
+// OrderFilter es la consulta del listado de órdenes de la consola.
+type OrderFilter struct {
+	Statuses []order.Status // vacío = todos los estados
+	// Query busca por id de orden, paymentId, número de póliza, correlation-id o placa exacta.
+	Query  string
+	Limit  int
+	Cursor *OrderCursor // nil = primera página
+}
+
+// OrderCursor marca dónde sigue el listado: las órdenes van de la más reciente a la más antigua, y el
+// id desempata las creadas en el mismo instante.
+type OrderCursor struct {
+	CreatedAt time.Time
+	ID        order.OrderID
+}
+
+// OrderPage es una página del listado. Next es nil en la última página.
+type OrderPage struct {
+	Orders []order.Order
+	Next   *OrderCursor
+}
+
+// OrderLister lista órdenes para la consola de operaciones.
+type OrderLister interface {
+	ListOrders(ctx context.Context, f OrderFilter) (OrderPage, error)
+}
+
+// ThirdParty identifica a un tercero con el que habla el orquestador.
+type ThirdParty string
+
+const (
+	PartyQuoter ThirdParty = "quoter"
+	PartyPSP    ThirdParty = "psp"
+	PartyIssuer ThirdParty = "issuer"
+)
+
+// CallOperation es la operación que se le pidió al tercero.
+type CallOperation string
+
+const (
+	OpQuote         CallOperation = "quote"
+	OpCreatePayment CallOperation = "create_payment"
+	OpIssue         CallOperation = "issue"
+	OpFindPolicy    CallOperation = "find_policy"
+)
+
+// CallOutcome resume cómo terminó un intento con un tercero.
+type CallOutcome string
+
+const (
+	CallOK          CallOutcome = "OK"
+	CallRejected    CallOutcome = "REJECTED"     // rechazo definitivo (4xx o regla de negocio)
+	CallUnavailable CallOutcome = "UNAVAILABLE"  // 5xx, sin conexión o respuesta inválida
+	CallTimeout     CallOutcome = "TIMEOUT"      // venció el tiempo del intento
+	CallCircuitOpen CallOutcome = "CIRCUIT_OPEN" // el breaker estaba abierto: no se llamó
+	CallNotFound    CallOutcome = "NOT_FOUND"    // la consulta confirmó que la póliza no existe
+)
+
+// ThirdPartyCall es un intento de llamada a un tercero. Es lo que la consola muestra como "respuestas de
+// terceros": nunca guarda el cuerpo de la solicitud ni de la respuesta, que llevan placa y documento.
+type ThirdPartyCall struct {
+	OrderID   order.OrderID
+	Party     ThirdParty
+	Operation CallOperation
+	Outcome   CallOutcome
+	Detail    string // el error del adaptador (código HTTP, código del emisor), vacío si salió bien
+	Duration  time.Duration
+	StartedAt time.Time
+}
+
+// StoredCall es una llamada ya registrada.
+type StoredCall struct {
+	ID int64
+	ThirdPartyCall
+}
+
+// CallRecorder registra las llamadas a terceros.
+type CallRecorder interface {
+	RecordCall(ctx context.Context, c ThirdPartyCall) error
+}
+
+// CallReader lee las llamadas de una orden en orden de ocurrencia, o devuelve ErrOrderNotFound.
+type CallReader interface {
+	ListCalls(ctx context.Context, id order.OrderID) ([]StoredCall, error)
 }
