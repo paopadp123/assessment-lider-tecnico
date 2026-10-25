@@ -10,7 +10,7 @@ info "caos: el emisor rechaza toda emisión con un error de negocio"
 
 step "POST /orders"
 read -r code order <<<"$(create_order "e2e-reembolso-$(date +%s)-$RANDOM" "e2e-reembolso-$RANDOM")"
-[[ "$code" == 201 ]] || fail "se esperaba 201 y llegó $code: $order"
+[[ "$code" == 201 ]] || fail "se esperaba 201 y llegó $code: $(brief "$order")"
 id="$(jq -r .id <<<"$order")"
 info "orden $id"
 
@@ -31,4 +31,8 @@ curl -fsS -X POST "$ORCH/orders/$id/actions/retry-issuance" -H "Authorization: B
 wait_status "$id" ISSUED 60
 expect_single_policy "$id"
 timeline "$id" | tail -n 3
-pass "la acción quedó en la línea de tiempo con el usuario del operador"
+operator="$(env_get OPS_BOOTSTRAP_USER)"
+retried="$(events "$id" | jq --arg op "$operator" '[.[] | select(.from == "REFUND_REQUIRED" and .to == "ISSUING" and .actor == $op)] | length')"
+[[ "$retried" == 1 ]] || fail "no quedó en la línea de tiempo el reintento hecho por $operator"
+[[ "$(events "$id" | jq -r '.[-1].to')" == ISSUED ]] || fail "el último evento no es ISSUED"
+pass "el reintento quedó auditado con el operador $operator y la orden terminó en ISSUED"

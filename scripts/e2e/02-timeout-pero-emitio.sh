@@ -11,7 +11,7 @@ info "caos: el emisor emite y responde a los 8 s (la ACL corta a los 5 s)"
 corr="e2e-timeout-$RANDOM"
 step "POST /orders"
 read -r code order <<<"$(create_order "e2e-timeout-$(date +%s)-$RANDOM" "$corr")"
-[[ "$code" == 201 ]] || fail "se esperaba 201 y llegó $code: $order"
+[[ "$code" == 201 ]] || fail "se esperaba 201 y llegó $code: $(brief "$order")"
 id="$(jq -r .id <<<"$order")"
 info "orden $id"
 
@@ -21,7 +21,7 @@ pass "orden ISSUED con póliza $(order_get "$id" | jq -r .policyNumber)"
 expect_single_policy "$id"
 
 step "Lo que hizo la ACL (logs de issuing-service con el correlation-id $corr)"
-docker compose -f "$ROOT/docker-compose.yml" logs --no-log-prefix issuing-service 2>/dev/null | grep -F "$corr" | tail -n 5 || true
+docker compose -f "$ROOT/docker-compose.yml" logs --no-log-prefix issuing-service 2>/dev/null | grep -F "$corr" | jq -r '"  " + .Message' || true
 
 step "Línea de tiempo"
 timeline "$id"

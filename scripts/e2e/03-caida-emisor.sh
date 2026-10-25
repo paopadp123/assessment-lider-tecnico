@@ -12,7 +12,7 @@ ids=()
 step "Tres compras con el emisor caído"
 for n in 1 2 3; do
   read -r code order <<<"$(create_order "e2e-caida-$(date +%s)-$n-$RANDOM" "e2e-caida-$n-$RANDOM")"
-  [[ "$code" == 201 ]] || fail "se esperaba 201 y llegó $code: $order"
+  [[ "$code" == 201 ]] || fail "se esperaba 201 y llegó $code: $(brief "$order")"
   ids+=("$(jq -r .id <<<"$order")")
   info "orden ${ids[-1]}"
 done

@@ -32,15 +32,28 @@ wait_ready() {
   done
 }
 
-TOKEN=""
+# login deja el token en TOKEN. run-all.sh hace login una vez y lo pasa en E2E_TOKEN, porque el login
+# admite 5 intentos seguidos por IP y cada escenario suelto haría el suyo.
+TOKEN="${E2E_TOKEN:-}"
 login() {
-  local user password body
+  [[ -n "$TOKEN" ]] && return 0
+  local user password body out code
   user="$(env_get OPS_BOOTSTRAP_USER)"
   password="$(env_get OPS_BOOTSTRAP_PASSWORD)"
   [[ -n "$user" && -n "$password" ]] || fail "faltan OPS_BOOTSTRAP_USER/OPS_BOOTSTRAP_PASSWORD en .env"
   body="$(jq -n --arg u "$user" --arg p "$password" '{username: $u, password: $p}')"
-  TOKEN="$(curl -fsS -X POST "$ORCH/auth/login" -H 'Content-Type: application/json' -d "$body" | jq -r .token)"
-  [[ -n "$TOKEN" && "$TOKEN" != null ]] || fail "login fallido"
+  out="$(mktemp)"
+  code="$(curl -sS -o "$out" -w '%{http_code}' -X POST "$ORCH/auth/login" -H 'Content-Type: application/json' -d "$body")"
+  TOKEN="$(jq -r '.token // empty' "$out" 2>/dev/null || true)"
+  rm -f "$out"
+  case "$code" in
+    200) ;;
+    429) fail "login: demasiados intentos desde esta IP (429); espera unos segundos" ;;
+    # El operador se crea solo si no existe: con un volumen de PostgreSQL anterior al .env, la contraseña es otra.
+    401) fail "login rechazado para $user. Si la base viene de antes del .env actual: docker compose down -v" ;;
+    *) fail "login respondió $code" ;;
+  esac
+  [[ -n "$TOKEN" ]] || fail "login sin token"
 }
 
 # ---------- caos del simulador ----------
@@ -50,7 +63,20 @@ chaos_set() { curl -fsS -X POST "$SIM/chaos" -H 'Content-Type: application/json'
 # chaos_save guarda el caos actual y lo restaura al salir del script, pase lo que pase.
 chaos_save() {
   CHAOS_BACKUP="$(curl -fsS "$SIM/chaos")"
-  trap 'chaos_set "$CHAOS_BACKUP" && info "caos restaurado"' EXIT
+  trap chaos_restore EXIT
+}
+
+# chaos_restore vuelve al caos guardado y comprueba que quedó igual; si no, el script sale con error.
+chaos_restore() {
+  local status=$? now
+  chaos_set "$CHAOS_BACKUP"
+  now="$(curl -fsS "$SIM/chaos")"
+  if [[ "$(jq -S . <<<"$now")" != "$(jq -S . <<<"$CHAOS_BACKUP")" ]]; then
+    printf '\033[1;31m✘ el caos no quedó como estaba antes del escenario\033[0m\n' >&2
+    exit 1
+  fi
+  info "caos restaurado"
+  exit "$status"
 }
 
 # chaos_calm apaga todas las fallas al azar, para que cada escenario muestre solo la falla que fuerza.
@@ -71,7 +97,8 @@ random_plate() {
   printf '%s%s%s%02d%d' "${letters:RANDOM%26:1}" "${letters:RANDOM%26:1}" "${letters:RANDOM%26:1}" $((RANDOM % 100)) $((RANDOM % 10))
 }
 
-# create_order KEY CORRELATION [PLATE]: imprime "<status HTTP> <JSON de la orden>".
+# create_order KEY CORRELATION [PLATE]: imprime "<status HTTP> <JSON de la orden>". Si el status no es
+# el esperado, mostrar la respuesta con `brief`: la orden trae la placa y no debe ir completa a la salida.
 create_order() {
   local key="$1" corr="$2" plate="${3:-$(random_plate)}" out code body
   body="$(jq -cn --arg p "$plate" '{plate: $p, vehicleYear: 2020, cityCode: "11001", documentId: "1020304050"}')"
@@ -83,6 +110,9 @@ create_order() {
 }
 
 order_get() { curl -fsS "$ORCH/orders/$1"; }
+
+# brief JSON: solo el error de una respuesta fallida (sin datos de la orden).
+brief() { jq -r '.error // "sin detalle"' <<<"$1" 2>/dev/null || echo "respuesta ilegible"; }
 
 # wait_status ID ESTADO SEGUNDOS: espera el estado y falla si la orden termina en otro estado final.
 wait_status() {
@@ -98,7 +128,7 @@ wait_status() {
 
 # timeline ID: línea de tiempo de la orden (requiere login).
 timeline() {
-  curl -fsS "$ORCH/orders/$1/events" -H "Authorization: Bearer $TOKEN" |
+  events "$1" |
     jq -r '.[] | "  \(.occurredAt[11:19])  \(.from // "—") → \(.to)  (\(.reason), \(.actor))"'
 }
 
@@ -106,11 +136,17 @@ breaker_state() { curl -fsS "$ORCH/ops/breakers" -H "Authorization: Bearer $TOKE
 
 # issuer_log_count ID PATRÓN: líneas del log del emisor simulado para ese externalRef cuyo mensaje empieza
 # con PATRÓN. Necesita docker compose (corre en la máquina donde está el sistema).
+# Falla si no puede leer los logs: un conteo de 0 por no tener logs haría pasar las verificaciones.
 issuer_log_count() {
-  docker compose -f "$ROOT/docker-compose.yml" logs --no-log-prefix simulator 2>/dev/null |
-    jq -R --arg ref "$1" --arg p "$2" 'fromjson? | select(.externalRef == $ref and (.msg | startswith($p)))' |
+  local logs
+  logs="$(docker compose -f "$ROOT/docker-compose.yml" logs --no-log-prefix simulator)" || fail "no se pudieron leer los logs del simulador"
+  [[ -n "$logs" ]] || fail "los logs del simulador están vacíos"
+  jq -R --arg ref "$1" --arg p "$2" 'fromjson? | select(.externalRef == $ref and (.msg | startswith($p)))' <<<"$logs" |
     jq -s length
 }
+
+# events ID: la línea de tiempo en JSON (requiere login).
+events() { curl -fsS "$ORCH/orders/$1/events" -H "Authorization: Bearer $TOKEN"; }
 
 # expect_single_policy ID: la regla crítica, una sola póliza por orden. El emisor simulado guarda una
 # póliza por externalRef, así que contar sus pólizas siempre da 1; la prueba real son sus logs: /issue
