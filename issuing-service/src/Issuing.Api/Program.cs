@@ -16,7 +16,8 @@ builder.Services.AddOptions<LegacyIssuerOptions>()
     .ValidateOnStart();
 builder.Services.AddHttpClient<LegacyIssuerClient>((services, http) =>
 {
-    Uri baseUrl = services.GetRequiredService<IOptions<LegacyIssuerOptions>>().Value.BaseUrl!;
+    Uri baseUrl = services.GetRequiredService<IOptions<LegacyIssuerOptions>>().Value.BaseUrl
+        ?? throw new InvalidOperationException("LegacyIssuer:BaseUrl is required");
     // Con la barra final, "issue" y "policies" se resuelven debajo de la ruta base y no la reemplazan.
     http.BaseAddress = baseUrl.AbsoluteUri.EndsWith('/') ? baseUrl : new Uri(baseUrl.AbsoluteUri + "/");
 });
