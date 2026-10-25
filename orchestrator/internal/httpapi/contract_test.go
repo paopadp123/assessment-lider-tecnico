@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/getkin/kin-openapi/openapi3filter"
@@ -54,6 +55,7 @@ func testHandlers(creator OrderCreator, reader OrderReader, actions *fakeActions
 		Webhooks: NewWebhooks(&fakePaymentHandler{res: app.PaymentEventResult{Outcome: app.PaymentApplied}}, v, discard()),
 		Login:    NewLogin(operators, NewIPRateLimiter(5), discard()),
 		Ops:      ops,
+		Console:  NewConsole(&fakeLister{page: app.OrderPage{Orders: []order.Order{contractOrder()}, Next: &app.OrderCursor{CreatedAt: time.Now(), ID: orderID}}}, fakeCalls{calls: contractCalls}, discard()),
 		Breakers: Breakers(func() BreakerStatus { return BreakerStatus{Name: "policy-issuer", State: "closed"} }),
 		Ready:    ready,
 		Require:  RequireOperator(operators),
@@ -61,6 +63,22 @@ func testHandlers(creator OrderCreator, reader OrderReader, actions *fakeActions
 }
 
 func allReady() http.HandlerFunc { return Ready() }
+
+// contractOrder es una orden emitida completa para validar el listado contra el contrato.
+func contractOrder() order.Order {
+	o, _ := order.NewOrder(order.NewOrderInput{Plate: "ABC123", DocumentID: "1020304050", VehicleYear: 2020, CityCode: "11001"})
+	o.ID, o.Status, o.PaymentID, o.PolicyNumber = orderID, order.Issued, "pay-1", "POL-1"
+	o.Quote = &order.Quote{ID: "q-1", Premium: "850000.50", Currency: "COP", ValidUntil: time.Now()}
+	o.CreatedAt, o.UpdatedAt = time.Now(), time.Now()
+	return o
+}
+
+var contractCalls = []app.StoredCall{
+	{ID: 1, ThirdPartyCall: app.ThirdPartyCall{OrderID: orderID, Party: app.PartyIssuer, Operation: app.OpIssue,
+		Outcome: app.CallTimeout, Detail: "deadline exceeded", Duration: 5 * time.Second, StartedAt: time.Now()}},
+	{ID: 2, ThirdPartyCall: app.ThirdPartyCall{OrderID: orderID, Party: app.PartyIssuer, Operation: app.OpFindPolicy,
+		Outcome: app.CallOK, Duration: 300 * time.Millisecond, StartedAt: time.Now()}},
+}
 
 // Si una ruta existe en el código pero no en el contrato, la consola no tendría su tipo: la prueba falla.
 func TestContract_EveryRegisteredRouteIsDocumented(t *testing.T) {
@@ -151,6 +169,11 @@ func TestContract_ResponsesMatchSchemas(t *testing.T) {
 		{name: "línea de tiempo sin token", method: http.MethodGet, path: orderPath + "/events"},
 		{name: "reintentar emisión", method: http.MethodPost, path: orderPath + "/actions/retry-issuance", token: "token-ana.perez", actions: &fakeActions{}},
 		{name: "reverso no permitido", method: http.MethodPost, path: orderPath + "/actions/mark-for-reversal", token: "token-ana.perez", actions: &fakeActions{err: app.ErrActionNotAllowed}},
+		{name: "listado", method: http.MethodGet, path: "/orders?status=ISSUING&q=pay-1&limit=10", token: "token-ana.perez"},
+		{name: "listado inválido", method: http.MethodGet, path: "/orders?status=PAGADA", token: "token-ana.perez"},
+		{name: "listado sin token", method: http.MethodGet, path: "/orders"},
+		{name: "llamadas a terceros", method: http.MethodGet, path: "/orders/" + string(orderID) + "/calls", token: "token-ana.perez"},
+		{name: "llamadas de orden inexistente", method: http.MethodGet, path: "/orders/4f1c2a7e-0000-4000-8000-0000000000ff/calls", token: "token-ana.perez"},
 		{name: "breakers", method: http.MethodGet, path: "/ops/breakers", token: "token-ana.perez"},
 		{name: "vivo", method: http.MethodGet, path: "/health/live"},
 		{name: "listo", method: http.MethodGet, path: "/health/ready"},

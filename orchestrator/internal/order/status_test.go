@@ -79,3 +79,16 @@ func TestTransition_InvalidIsRejectedAndOrderUnchanged(t *testing.T) {
 		t.Fatalf("la orden cambió a %s tras una transición inválida", o.Status)
 	}
 }
+
+func TestStatus_Valid(t *testing.T) {
+	for _, s := range []Status{Created, Quoted, PaymentPending, Paid, Issuing, Issued, Failed, RefundRequired} {
+		if !s.Valid() {
+			t.Errorf("%s debería ser válido", s)
+		}
+	}
+	for _, s := range []Status{"", "PAGADA", "issued"} {
+		if s.Valid() {
+			t.Errorf("%q no debería ser válido", s)
+		}
+	}
+}

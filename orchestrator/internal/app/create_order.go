@@ -113,7 +113,7 @@ func (uc *CreateOrder) quote(ctx context.Context, log *slog.Logger, o order.Orde
 // FAILED con su motivo. No guarda nada: lo usan la creación de la orden y el reconciliador.
 func quoteOrder(ctx context.Context, quoter Quoter, sleep func(context.Context, time.Duration) error, log *slog.Logger,
 	now func() time.Time, o *order.Order) (order.Event, []Command, error) {
-	req := QuoteRequest{Plate: o.Plate.Raw(), VehicleYear: o.VehicleYear, CityCode: o.CityCode, DocumentID: o.DocumentID.Raw()}
+	req := QuoteRequest{OrderID: o.ID, Plate: o.Plate.Raw(), VehicleYear: o.VehicleYear, CityCode: o.CityCode, DocumentID: o.DocumentID.Raw()}
 	q, attempts, err := withRetry(ctx, quotePolicy, sleep, isTransient(ErrQuoteUnavailable),
 		func(ctx context.Context) (order.Quote, error) { return quoter.Quote(ctx, req) })
 	if err != nil {

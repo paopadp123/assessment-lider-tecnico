@@ -39,7 +39,7 @@ func testPool(t *testing.T) *pgxpool.Pool {
 	if err := Migrate(ctx, pool); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	if _, err := pool.Exec(ctx, "TRUNCATE dead_letters, outbox, payment_events, order_events, idempotency_keys, orders, operators"); err != nil {
+	if _, err := pool.Exec(ctx, "TRUNCATE third_party_calls, dead_letters, outbox, payment_events, order_events, idempotency_keys, orders, operators"); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
 	return pool
