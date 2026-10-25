@@ -9,6 +9,10 @@ videos/
 *.mkv
 *.mov
 
+# Registro crudo de todos los prompts (lo escribe el hook log-prompt); solo local.
+# La bitácora curada que se entrega es docs/ai/prompt-log.md.
+docs/ai/prompts-raw.md
+
 # Secretos
 .env
 .env.*

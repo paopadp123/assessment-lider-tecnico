@@ -1,4 +1,4 @@
-// UserPromptSubmit: guarda cada prompt real, tal como se escribió, en docs/ai/prompts-raw.md.
+// UserPromptSubmit: guarda cada prompt real, tal como se escribió, en docs/ai/prompts-raw.md (solo local, ignorado por git).
 // Insumo de la bitácora de prompts del Reporte de IA. Enmascara secretos evidentes.
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
