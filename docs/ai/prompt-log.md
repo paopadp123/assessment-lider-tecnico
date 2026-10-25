@@ -523,3 +523,60 @@ estudio, commits con Refs #11 y, al cerrar, PR dev → main del hito 1 y guía p
 
 **Qué se agregó y por qué:** el original solo nombraba la HU. Se agregaron las variables que exige cada servicio, el control /chaos para forzar cada escenario y qué reglas ya existen para no reimplementarlas. El usuario decidió hacer HU-10 antes que HU-09 (la consola queda fuera del compose por ahora) y escribir los escenarios en bash con jq.
 **Resultado:** compose completo (5 servicios healthy desde un volumen limpio) y 4 escenarios en verde, dos corridas seguidas (~1 min cada una), más el job `e2e` en el CI. Errores de la IA: (1) asignó una variable dentro de `$(...)` esperando leerla afuera (subshell; corregido antes de correr); (2) su primera verificación de "una sola póliza" contaba las pólizas del simulador, que guarda una por referencia: habría pasado aun con doble emisión. Se cambió a los logs de `/issue`. El QA encontró 2 bloqueantes: `.env.example` con CRLF en un clon de Windows rompía `dev-env.sh`, y la auditoría del operador se anunciaba sin verificarse. También encontró conteos de logs que daban 0 si `docker compose logs` fallaba (falso positivo), el límite de 5 logins por IP con varias corridas y la orden completa impresa en los errores. Todo quedó corregido.
+
+## 2026-10-24 23:55 — [HU-09] Consola de operaciones en Next.js + TypeScript
+**Herramienta:** Claude Code (skill /prompt)
+
+**Original (tal como se escribió):**
+> hu-09 /prompt
+
+**Refinado (ejecutado):**
+```text
+[HU-09] Consola de operaciones en Next.js + TypeScript (Refs #10, cierra #11)
+
+Contexto:
+- console/ está vacía. El OpenAPI del orquestador es la fuente de los tipos: login JWT (60 min), GET de
+  la orden, línea de tiempo, acciones retry-issuance / mark-for-reversal (auditadas, 409 si no aplican),
+  SSE /events/stream con Last-Event-ID, GET /ops/breakers.
+- Auth solo por "Authorization: Bearer"; no hay CORS; EventSource no envía cabeceras (ADR 0004).
+- No existe un endpoint de listado; el orquestador no guarda las llamadas a terceros, solo el resultado.
+- Los escenarios de scripts/e2e/ producen órdenes en ISSUED, ISSUING y REFUND_REQUIRED.
+- Plan: sin dark mode ni dashboard.
+
+Objetivo: un operador inicia sesión, encuentra órdenes, ve su línea de tiempo y las llamadas a terceros,
+ejecuta las acciones con confirmación y ve los cambios en vivo sin recargar.
+
+Restricciones:
+- Next.js (App Router) + TS strict sin any; tipos con openapi-typescript desde openapi.yaml, con un script
+  para regenerarlos y una verificación en CI.
+- BFF (decisión del usuario): el navegador solo habla con Next. El JWT va en una cookie httpOnly, Secure
+  y SameSite=Strict. Los route handlers reenvían al orquestador con el Bearer y el X-Correlation-ID; el
+  SSE también, con Last-Event-ID. Sin CORS en Go.
+- Go: GET /orders (filtro por estado repetible, búsqueda q, paginación por cursor, JWT) y registro de las
+  llamadas a terceros (decisión del usuario: tabla por intento con tercero, operación, resultado, duración
+  y detalle sin datos sensibles) con GET /orders/{id}/calls. Todo en el OpenAPI y con pruebas; explicar
+  el Go nuevo en 3–4 líneas.
+- Estilos simples, accesible; español y formato es-CO (sin i18n).
+
+Criterios de aceptación:
+1. Login: credenciales malas → mensaje claro; 429 → "espera"; 401 en cualquier llamada → al login;
+   logout borra la cookie.
+2. Lista: filtro por estado, búsqueda y paginación; estado vacío y errores visibles; nunca el documento.
+3. Detalle: cotización, pago, póliza, motivo de falla, línea de tiempo (from → to, motivo, actor, hora)
+   y llamadas a terceros.
+4. Acciones solo cuando aplican, con diálogo de confirmación; 409 → mensaje y recarga; actor en la línea.
+5. SSE: lista y detalle en vivo, reanudación con Last-Event-ID e indicador de conexión; justificación en
+   el README.
+6. Estado del breaker del emisor visible.
+7. Vitest para la lógica (reducer SSE, reglas de acciones, BFF); ESLint + typecheck + tests + build en CI.
+8. Servicio console en el compose (Dockerfile multi-stage, sin root, healthcheck) y en el guion de la
+   demo; verificado en el navegador con los escenarios E2E, con capturas.
+
+Fuera de alcance: dark mode, dashboards, gestión de operadores, i18n, E2E de navegador en CI.
+
+Formato de salida: rojo→verde (Go y lógica TS), QA con qa-reviewer, guía de estudio, commits con Refs #10
+/ Closes #11 sin ejecutar. Al cerrar: PR dev → main (hito 1) y guía práctica de estudio manual.
+```
+
+**Qué se agregó y por qué:** el original solo nombraba la HU. Se detectó que faltaban dos cosas en el backend para cumplir el issue: un endpoint de listado y el registro de las respuestas de terceros. También se planteó cómo autenticar el SSE, porque el navegador no puede mandar la cabecera. El usuario eligió guardar cada intento con un tercero (opción B) y el patrón BFF con cookie httpOnly (opción A). i18n quedó fuera de forma explícita.
+**Resultado:** backend con `GET /orders` (keyset) y registro de llamadas a terceros (decoradores, por fuera del breaker), consola Next.js con BFF y cookie httpOnly, 6 servicios en compose y los 4 escenarios en verde. Rojo real primero en Go y en la lógica de TS. Verificado en Chrome: la orden pasó sola de "Emitiendo" a "Emitida" con su historia "breaker abierto → no disponible → no existe → OK". Errores de la IA: (1) el refresco de la lista podía mostrar resultados del filtro anterior; (2) la conexión en vivo no se recuperaba si el orquestador se caía (los dos los encontró el QA); (3) el BFF tardaba 15 s en abrir el SSE porque Next no envía cabeceras hasta el primer byte. Lo encontré midiendo, porque las pruebas pasaban. También se corrigieron: logout sin protección CSRF, `JSON.parse` sin validar y una prueba que cambió de 400 a 404 por consistencia con la API existente.
