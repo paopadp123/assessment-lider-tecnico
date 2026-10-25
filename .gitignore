@@ -28,6 +28,7 @@ TestResults/
 
 # Node / Next.js
 node_modules/
+dist/
 .next/
 out/
 *.tsbuildinfo

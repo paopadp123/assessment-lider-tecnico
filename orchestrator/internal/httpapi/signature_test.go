@@ -38,6 +38,18 @@ func TestSignatureVerifier(t *testing.T) {
 	}
 }
 
+// Mismo vector que la prueba de la firma del simulador (simulator/test/sign-and-logs.test.ts): si uno de los
+// dos lados cambia el algoritmo, falla su prueba en vez de fallar la demo.
+func TestSignatureVerifier_SharedVector(t *testing.T) {
+	v, _ := NewSignatureVerifier(testSecret)
+
+	got := v.Sign("pay-1", "APPROVED", "2026-10-24T10:00:00Z")
+
+	if want := "c5192eb5811eabbd22ca4b83f466e13ecc8df6503e2550aa45d84c52c844cfac"; got != want {
+		t.Fatalf("Sign = %s, want %s", got, want)
+	}
+}
+
 func TestNewSignatureVerifier_RejectsShortSecret(t *testing.T) {
 	if _, err := NewSignatureVerifier("short"); err == nil {
 		t.Fatal("se esperaba error con un secreto corto")

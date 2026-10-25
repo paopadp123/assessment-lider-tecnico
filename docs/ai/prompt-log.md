@@ -354,3 +354,57 @@ commits propuestos. Sin commit ni push hasta el OK.
 
 **Qué se agregó y por qué:** el original solo nombraba la HU. Se agregó cómo sobrevive el correlation-id a los saltos asíncronos (una cabecera HTTP se pierde en la base y en la cola), una prueba de barrido de datos sensibles sobre el flujo completo y un OpenAPI verificado contra las respuestas reales para que la consola no reciba tipos falsos. El usuario eligió un id único por compra.
 **Resultado:** HU-06 terminada: 10 paquetes en verde (también en Linux con -race) y prueba de humo de punta a punta: el PSP recibió el correlation-id del cliente desde el worker, después de la outbox y RabbitMQ. El contrato OpenAPI se valida contra las respuestas reales; una mutación (renombrar `policyNumber`) hizo fallar la prueba. Errores de la IA: (1) dejó los logs de error de los handlers sin el correlation-id (QA); (2) escribió en el contrato un ejemplo de placa enmascarada que no coincide con el código; (3) el primer esquema aceptaba campos extra, así que un campo renombrado no se habría detectado: lo vio la propia IA al diseñar la mutación.
+
+## 2026-10-24 18:46 — [HU-08] Simulador de terceros con caos configurable
+**Herramienta:** Claude Code (skill /prompt)
+
+**Original (tal como se escribió):**
+> 08 /prompt
+
+**Refinado (ejecutado):**
+```text
+[HU-08] Simulador de terceros con caos configurable (issue #9)
+
+Contexto:
+- El orquestador Go (HU-01..06, en dev) ya consume a los terceros: cotizador POST /v1/quotes
+  {plate, vehicleYear, cityCode, documentId} → 200 {quoteId, premium, currency, validUntil}; PSP
+  POST /v1/payments {quoteId, amount, currency, customerRef} con Idempotency-Key = orderId → 202
+  {paymentId, status:"PENDING"}; webhook hacia el orquestador POST /webhooks/payments {paymentId,
+  status, occurredAt, signature}, HMAC-SHA256 hex sobre "paymentId|status|occurredAt" con
+  PSP_WEBHOOK_SECRET (≥32 bytes). Todos reciben X-Correlation-ID.
+- El emisor legado lo consume la ACL C# (HU-07, siguiente): este simulador DEFINE el contrato feo que
+  la ACL envolverá (POST /issue y GET /policies?externalRef={orderId}, Anexo B).
+- Plan: Node + TypeScript (Fastify), probabilidades por variables de entorno. Carpeta /simulator vacía.
+
+Objetivo: un servicio que simule a los 3 terceros con el caos del enunciado, reproducible en pruebas y
+controlable durante la demo del video.
+
+Restricciones: Node 24, TS strict sin any, Fastify, Vitest, ESLint, pocas dependencias; azar inyectable
+con semilla; un puerto con rutas por tercero; logs JSON sin placa ni documento completos; configuración
+por variables de entorno con los valores por defecto del enunciado.
+
+Criterios de aceptación:
+1. Cotizador: 200 con el contrato del Anexo B; 500 en ~5%; latencia 100 ms–3 s; 400 si falta un campo.
+2. PSP: 202 PENDING; misma Idempotency-Key → mismo paymentId sin segundo webhook; webhook firmado tras
+   un retardo, APPROVED/REJECTED en proporción configurable; 10% duplicados; entrega fuera de orden;
+   reintento del webhook si el orquestador no responde 2xx (con límite).
+3. Emisor legado: POST /issue verboso, redundante y anidado; 200 con póliza o 200 con {result:"ERROR",
+   code, message} (negocio y técnico); latencia variable; "timeout pero sí emitió" (emite y responde a
+   los 8 s); idempotente por externalRef; GET /policies?externalRef= documentado.
+4. 5% de respuestas con formato inválido, configurable por tercero (decisión del usuario: los 3).
+5. Ventana de caída total del emisor por variables de entorno y endpoint de control POST /chaos para
+   ver y cambiar porcentajes y caída en vivo (decisión del usuario).
+6. Pruebas con semilla fija: porcentajes en N solicitudes, idempotencia de PSP y emisor, firma con
+   vector compartido con el Go, duplicado y desorden, timeout-pero-emitió + GET, ventana de caída.
+7. Dockerfile multi-stage y job de CI (lint + test).
+8. README del simulador: variables, contrato del emisor, cómo activar cada falla.
+
+Fuera de alcance: docker-compose y escenarios E2E (HU-10), ACL C# (HU-07), persistencia (estado en
+memoria, documentado).
+
+Formato de salida: rojo→verde real (stubs en test:), QA con qa-reviewer, guía de estudio, commits con
+Refs #9 y PR abierto por Claude.
+```
+
+**Qué se agregó y por qué:** el original solo nombraba la HU. Se agregaron los contratos que el orquestador ya consume (para que el simulador no los contradiga), la firma exacta del webhook, el orden 08 antes de 07 (el simulador define el contrato del emisor que la ACL envuelve), azar con semilla para que las pruebas de porcentajes no sean intermitentes y el endpoint /chaos para que la demo del video no dependa del reloj.
+**Resultado:** HU-08 terminada: 47 pruebas con semilla fija (rojo real primero: 36 de 44 en rojo con stubs) y prueba de humo con el orquestador real: 6 compras pagadas que absorbieron un webhook duplicado y una cotización inválida. Errores de la IA: (1) no previó que Fastify borra en silencio los campos desconocidos (`/chaos` habría aceptado un error de tipeo); lo detectó su propia prueba. (2) Dejó el build (`dist/`) sin ignorar (QA, bloqueante). (3) El webhook temprano podía retener el 202 hasta 5 s (QA).
