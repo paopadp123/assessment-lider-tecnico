@@ -14,7 +14,22 @@ Compra de una póliza vehicular digital que cruza tres terceros que fallan de fo
 | `docs/adr/` | Decisiones de arquitectura |
 
 ## 1. Cómo levantar todo en un comando
-_En construcción._
+Requisitos: Docker con Compose v2, bash (en Windows, Git Bash), `curl`, `jq` y `openssl`.
+
+```bash
+bash scripts/dev-env.sh                  # crea .env con secretos aleatorios (una sola vez)
+docker compose up --build --wait         # PostgreSQL, RabbitMQ, simulador, ACL y orquestador
+bash scripts/e2e/run-all.sh              # los 4 escenarios de punta a punta (~1 min)
+```
+
+| Servicio | URL |
+|---|---|
+| Orquestador (API + OpenAPI) | http://localhost:8080 · `/openapi.yaml` |
+| Capa de emisión (ACL) | http://localhost:8081 |
+| Simulador de terceros y caos | http://localhost:8090 · `/chaos` |
+| RabbitMQ (colas, reintentos, DLQ) | http://localhost:15672 (usuario y clave del `.env`) |
+
+Los escenarios (compra feliz, timeout pero emitió, caída del emisor con recuperación y pago aprobado con emisión rechazada) están en [`docs/demo.md`](docs/demo.md), que también es el guion del video. El CI los corre en cada push (job `e2e`). La consola se agrega en HU-09.
 
 ## 2. Video de sustentación
 _Pendiente._

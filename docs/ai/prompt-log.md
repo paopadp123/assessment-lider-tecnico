@@ -472,3 +472,54 @@ Refs #8 y PR abierto por Claude; al cerrar, el prompt de la revisión B de Antig
 
 **Qué se agregó y por qué:** el original solo nombraba la HU. Se agregaron los dos contratos que la ACL une (el limpio que el Go ya consume y el feo que definió el simulador), qué status tienen consecuencias de negocio (solo el 422 lleva a REFUND_REQUIRED) y el presupuesto de tiempo del intento. El usuario decidió que E-100 sea 502 y que la ACL consulte la póliza antes de responder tras un timeout o un JSON ilegible.
 **Resultado:** HU-07 terminada: 71 pruebas xUnit (rojo real primero: 53 de 60 en rojo con stubs) y prueba de humo con los 3 servicios. Con "timeout pero sí emitió" forzado al 100%, la ACL consultó y la compra quedó en ISSUED con una sola póliza. Errores de la IA, encontrados por el QA: (1) devolvía 422 ante `E-102` sin consultar, cuando la póliza vigente podía ser la propia y la orden pagada habría ido a reembolso; (2) usó `$` en las expresiones regulares de .NET, que acepta un salto de línea final. También se corrigieron, por el QA, la prima redundante con más de 2 decimales y el presupuesto de tiempos sin validar.
+
+## 2026-10-24 23:08 — [HU-10] Escenarios end to end y docker compose completo
+**Herramienta:** Claude Code (skill /prompt)
+
+**Original (tal como se escribió):**
+> hu-10 /prompt
+
+**Refinado (ejecutado):**
+```text
+[HU-10] Escenarios end to end y docker compose completo (Refs #11)
+
+Contexto:
+- docker-compose.yml solo levanta postgres (5433) y rabbitmq (5672/15672). Faltan los servicios.
+- Orquestador Go: exige DATABASE_URL, QUOTER_URL, PSP_URL, PSP_WEBHOOK_SECRET, RABBITMQ_URL, ISSUER_URL,
+  JWT_SECRET; opcionales STUCK_AFTER, RECONCILE_EVERY, PORT, OPS_BOOTSTRAP_*. No tiene Dockerfile.
+- ACL C# (issuing-service): ya tiene Dockerfile; necesita LegacyIssuer__BaseUrl. PR #30 ya está en dev.
+- Simulador: ya tiene Dockerfile, puerto 8090, caos por variables de entorno y en vivo con GET/POST /chaos.
+  PSP_WEBHOOK_SECRET compartido con el orquestador y PSP_WEBHOOK_URL apuntando a él.
+- Reglas ya implementadas: consulta por externalRef antes de reintentar; breaker abierto → ISSUING
+  encolada; 422 del emisor o 3.ª ronda sin póliza → REFUND_REQUIRED.
+- La consola (HU-09) no existe todavía; decisión del usuario: HU-10 primero y HU-09 después.
+
+Objetivo: que `docker compose up` levante todo el backend y haya 4 escenarios reproducibles que sirvan de
+guion para la demo del video.
+
+Restricciones: Dockerfile multi-stage del orquestador (imagen mínima, usuario no root); compose con
+healthchecks y depends_on service_healthy; secretos por .env (.env.example versionado), nunca en el YAML;
+un solo PSP_WEBHOOK_SECRET; STUCK_AFTER/RECONCILE_EVERY cortos y SIM_SEED fijo; scripts en bash con curl
++ jq (decisión del usuario) y el control /chaos; solo endpoints que existen; cambios en Go explicados en
+3–4 líneas.
+
+Criterios de aceptación:
+1. `docker compose up --build` desde cero deja todo healthy; /health y /ready del orquestador en 200.
+2. Compra feliz hasta ISSUED con póliza; repetir el POST con la misma Idempotency-Key devuelve la misma orden.
+3. Timeout pero emitió (timeoutButIssuedRate=1): ISSUED con una sola póliza para su externalRef.
+4. Caída del emisor: breaker abierto y orden en ISSUING visible; al levantarlo, la reconciliación la lleva
+   a ISSUED sin duplicar.
+5. Pago aprobado + emisión fallida (businessErrorRate=1): REFUND_REQUIRED con su motivo en los eventos.
+6. Cada escenario restaura el caos y muestra el estado final y la línea de tiempo de la orden.
+7. Guion de la demo en docs/ (incluida la UI de RabbitMQ: cola, reintentos, DLQ).
+8. CI en verde (build de la imagen del orquestador si encaja con el pipeline).
+
+Fuera de alcance: consola y su servicio en el compose (HU-09), Terraform/AWS (HU-15), cambios de reglas
+de negocio (si un escenario revela un bug, se reporta y se arregla aparte, con su prueba).
+
+Formato de salida: Dockerfile, compose, .env.example, scripts, guion, QA con qa-reviewer, guía de
+estudio, commits con Refs #11 y, al cerrar, PR dev → main del hito 1 y guía práctica de estudio manual.
+```
+
+**Qué se agregó y por qué:** el original solo nombraba la HU. Se agregaron las variables que exige cada servicio, el control /chaos para forzar cada escenario y qué reglas ya existen para no reimplementarlas. El usuario decidió hacer HU-10 antes que HU-09 (la consola queda fuera del compose por ahora) y escribir los escenarios en bash con jq.
+**Resultado:** compose completo (5 servicios healthy desde un volumen limpio) y 4 escenarios en verde, dos corridas seguidas (~1 min cada una), más el job `e2e` en el CI. Errores de la IA: (1) asignó una variable dentro de `$(...)` esperando leerla afuera (subshell; corregido antes de correr); (2) su primera verificación de "una sola póliza" contaba las pólizas del simulador, que guarda una por referencia: habría pasado aun con doble emisión. Se cambió a los logs de `/issue`. El QA encontró 2 bloqueantes: `.env.example` con CRLF en un clon de Windows rompía `dev-env.sh`, y la auditoría del operador se anunciaba sin verificarse. También encontró conteos de logs que daban 0 si `docker compose logs` fallaba (falso positivo), el límite de 5 logins por IP con varias corridas y la orden completa impresa en los errores. Todo quedó corregido.
