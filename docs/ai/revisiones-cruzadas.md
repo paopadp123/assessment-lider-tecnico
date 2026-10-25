@@ -146,3 +146,20 @@ _Antigravity: entra en la revisión A al cerrar HU-05._
 - Mutación del contrato: al renombrar `policyNumber` en el código, la prueba de contrato falló (para eso se agregó `additionalProperties: false` a las respuestas; sin eso, un campo renombrado pasaba inadvertido).
 - Al cambiar la inserción de la outbox a `INSERT … SELECT`, Claude notó que un comando para una orden inexistente dejaría de fallar y se perdería en silencio; ahora devuelve `ErrOrderNotFound`, con prueba.
 - Todo se corrió también en Linux con `-race` antes de proponer los commits (lección de la falla del CI en HU-05).
+
+## HU-08 — Simulador de terceros con caos
+
+| Hallazgo | Lo encontró | Veredicto | Acción |
+|---|---|---|---|
+| `simulator/dist/` (el build) no estaba ignorado: se habría commiteado | QA (Haiku) | **Válido, bloqueante** | `dist/` en el `.gitignore` |
+| El webhook temprano retenía el 202 hasta que el orquestador respondiera (hasta 5 s) | QA (Haiku) | Válido: con un orquestador lento, el 202 podía superar su timeout | El 202 espera la entrega como máximo 1 s; prueba con un orquestador que no responde |
+| Faltaban pruebas de la latencia variable del emisor y de `PSP_APPROVE_RATE` | QA (Haiku) | Válido | Pruebas agregadas |
+| Una ventana de caída de duración 0 fallaba con un error poco claro | QA (Haiku) | Válido | `ConfigError` con mensaje claro, con prueba |
+| Avisos al arrancar: opción deprecada de Fastify y tipos unión en el esquema del monto | QA (Haiku) | Válido (ruido) | `logController` y `allowUnionTypes` |
+| Pagos y pólizas en memoria sin límite; la semilla solo repite la corrida con solicitudes en orden | QA (Haiku) | Aceptado: es un stub de demo | Documentado en el README |
+
+**Verificaciones propias antes del QA:**
+- Fastify **borra en silencio** los campos que el esquema no conoce: `POST /chaos {"issuer":{"dwon":true}}` respondía 200 sin cambiar nada, y en la demo eso engaña. Lo detectó la prueba "rechaza un campo desconocido"; ahora responde 400.
+- Prueba de humo con el orquestador Go real: 6 compras llegaron pagadas a ISSUING (todavía sin ACL). En el camino absorbió un webhook duplicado y una cotización con JSON cortado, que reintentó.
+- Imagen Docker: arranca, el healthcheck pasa y `/chaos` tumba el emisor (`/issue` → 503).
+- La firma del webhook comparte un vector fijo con la prueba de Go (`TestSignatureVerifier_SharedVector`).
