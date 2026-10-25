@@ -180,3 +180,14 @@ _Antigravity: entra en la revisión A al cerrar HU-05._
 - **Prueba de humo con los 3 servicios** (orquestador + simulador + ACL): 9 de 12 compras llegaron a ISSUED. Las otras 3 fueron pagos rechazados por el caos del PSP, el comportamiento correcto. Además, el reconciliador emitió 8 órdenes que habían quedado atascadas en las pruebas de humo anteriores, sin pólizas duplicadas.
 - **"Timeout pero sí emitió" forzado al 100%** con `/chaos`, con la imagen Docker de la ACL: esperó 5 s, consultó, encontró la póliza y la compra quedó en ISSUED con una sola póliza.
 - Los logs JSON de la ACL mostraban el scope como `Dictionary`2` y 4 líneas por cada llamada HTTP. Se corrigió con un scope con plantilla y el nivel Warning para HttpClient.
+
+## Revisión B de Antigravity (HU-07, código de producción de la ACL)
+
+Prompt acotado: el diff de `issuing-service/src`, 5 preguntas de riesgo (422 falso, doble emisión, tiempos y cancelación, datos sensibles y contrato, calidad del C#) y la lista de decisiones ya aceptadas.
+
+| Pregunta | Antigravity | Verificación de Claude |
+|---|---|---|
+| 1–4 | Sin hallazgo, con la justificación línea por línea | Coincide con el código y con las pruebas. Los dos riesgos reales de estas preguntas (E-102 sin confirmar y `$` en las expresiones) ya los había encontrado y corregido el QA antes de esta revisión |
+| 5. Calidad del C# | Sin hallazgo; afirma que no hay operadores null-forgiving | **Inexacto:** había uno (`BaseUrl!` en `Program.cs`). No fallaba, porque `ValidateOnStart` exige la URL antes, pero se reemplazó por un error explícito |
+
+**Lectura:** una revisión sin hallazgos que llega después del QA confirma más de lo que descubre. Además, una de sus afirmaciones era falsa: el resultado de otra IA también se verifica contra el código antes de darlo por bueno.
