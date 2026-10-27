@@ -4,6 +4,8 @@
 set -u
 API=${API:-http://localhost:8085/api}
 DIR=$(dirname "$0")
+# forjar-jwt.py lee el secreto del clon del fork (no se copia en este repositorio)
+export GOLANG_GIN_REPO=${GOLANG_GIN_REPO:-$DIR/../../../PruebaSimon-forks/golang-gin-realworld-example-app}
 SUF=$RANDOM
 
 echo "== Preparación: se registran dos usuarios, Alice y Bob"
