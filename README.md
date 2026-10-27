@@ -36,7 +36,94 @@ Los escenarios (compra feliz, timeout pero emitió, caída del emisor con recupe
 _Pendiente._
 
 ## 3. Arquitectura
-_Pendiente._
+
+```mermaid
+flowchart LR
+    subgraph Operaciones
+        OP["Operador<br/>navegador"]
+    end
+    subgraph Console["Consola · Next.js + TypeScript"]
+        BFF["BFF<br/>cookie httpOnly · proxy de la API y del SSE"]
+    end
+    subgraph Orch["Orquestador · Go"]
+        direction TB
+        H["httpapi<br/>órdenes · webhook HMAC · login JWT · acciones · SSE"] --> APP["app<br/>casos de uso · reintentos · breaker · reconciliador"]
+        APP --> DOM["order<br/>máquina de estados · validación · enmascarado"]
+        ADP["adapters<br/>postgres · rabbitmq · quoter · psp · issuer"] --> APP
+    end
+    subgraph Datos
+        PG[("PostgreSQL<br/>órdenes · outbox · eventos<br/>llamadas a terceros · operadores")]
+        MQ[["RabbitMQ<br/>comandos · reintentos con TTL<br/>aplazados · DLQ"]]
+    end
+    subgraph ACL["Capa de emisión · C# / .NET"]
+        ISS["Contrato limpio · traducción de errores<br/>idempotencia por externalRef"]
+    end
+    subgraph Terceros["Simulador de terceros · Node + TypeScript (con caos)"]
+        Q["Cotizador"]
+        PSP["Pasarela de pagos"]
+        LEG["Emisor legado"]
+    end
+    CLI["Canal de venta<br/>(cliente de la API)"] -- "POST /orders<br/>Idempotency-Key" --> H
+    OP -- "HTTPS" --> BFF
+    BFF -- "Bearer JWT · SSE" --> H
+    ADP -- "SQL · outbox con SKIP LOCKED" --> PG
+    ADP -- "publica y consume comandos" --> MQ
+    ADP -- "X-Correlation-ID" --> Q
+    ADP -- "Idempotency-Key = orderId" --> PSP
+    PSP -. "webhook firmado<br/>(duplicados, desorden)" .-> H
+    ADP -- "circuit breaker" --> ISS
+    ISS -- "contrato verboso<br/>consulta antes de reintentar" --> LEG
+```
+
+**Cómo fluye una compra:** el orquestador crea la orden con su `Idempotency-Key`, cotiza (reintentos con backoff y jitter) y pide el pago. El webhook del PSP llega firmado, se deduplica y se aplica en orden lógico aunque llegue desordenado. Cada paso asíncrono se guarda en la **outbox** en la misma transacción que el cambio de estado; un despachador lo publica en RabbitMQ y los workers lo procesan con reintentos por TTL y DLQ. La emisión pasa por la **capa anticorrupción** detrás de un circuit breaker: con el circuito abierto, el comando se aplaza sin consumir intentos. El **reconciliador** revisa las órdenes atascadas y consulta al emisor antes de reintentar. Todo el recorrido lleva un **correlation-id por compra** (ADR 0006).
+
+**Estados de la orden** (fuente única: [`orchestrator/internal/order/status.go`](orchestrator/internal/order/status.go)):
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> CREATED
+    CREATED --> QUOTED: cotización
+    QUOTED --> PAYMENT_PENDING: pago solicitado
+    PAYMENT_PENDING --> PAID: webhook APPROVED
+    PAID --> ISSUING: comando issue_policy
+    ISSUING --> ISSUED: póliza emitida o encontrada
+    CREATED --> FAILED: cotización rechazada o no disponible
+    QUOTED --> FAILED: el PSP no acepta el pago
+    PAYMENT_PENDING --> FAILED: webhook REJECTED
+    PAID --> REFUND_REQUIRED: operador marca para reverso
+    ISSUING --> REFUND_REQUIRED: rechazo del emisor, 3.ª reconciliación sin póliza u operador
+    REFUND_REQUIRED --> ISSUING: operador reintenta
+    REFUND_REQUIRED --> ISSUED: la póliza aparece
+    ISSUED --> [*]
+    FAILED --> [*]
+```
+
+Regla clave: **una orden pagada nunca pasa a FAILED.** Si no hay póliza, queda en `REFUND_REQUIRED` y operaciones decide desde la consola, con la acción auditada.
+
+**Orquestador en Go** (hexagonal liviana: las dependencias apuntan hacia `order`):
+
+| Paquete | Responsabilidad |
+|---|---|
+| `internal/order` | Dominio puro: estados y transiciones, validación, enmascarado de placa y documento. Sin E/S |
+| `internal/app` | Casos de uso (crear orden, pedir pago, webhook, emitir, reconciliar, acciones de operador), despachador de la outbox, reintentos y puertos (interfaces) |
+| `internal/adapters` | Implementaciones de los puertos: PostgreSQL (`pgx`, migraciones), RabbitMQ y los clientes HTTP del cotizador, el PSP y la capa de emisión |
+| `internal/httpapi` | Rutas, firma HMAC del webhook, JWT, SSE, health checks y contrato OpenAPI |
+| `internal/auth`, `internal/trace` | Login con bcrypt y JWT; correlation-id en el contexto y en los logs |
+
+**Estructura del repositorio**
+
+```
+├── orchestrator/      orquestador Go (cmd/, internal/, api/openapi.yaml)
+├── issuing-service/   capa anticorrupción C# (Domain, Application, Legacy, Http) y pruebas xUnit
+├── console/           consola Next.js (app/, components/, lib/server = BFF, lib/client)
+├── simulator/         cotizador, PSP y emisor legado simulados, con /chaos
+├── scripts/           generación del .env y escenarios E2E
+├── docs/              ADR, guion de la demo, bitácora de IA, capturas
+├── review/            informe del code review (Bloque 2)
+├── docker-compose.yml
+└── .github/workflows/ CI por servicio y job E2E
+```
 
 ## 4. Decisiones técnicas y por qué
 - [ADR 0001 — PostgreSQL como base de datos transaccional](docs/adr/0001-postgresql-como-base-de-datos.md)
