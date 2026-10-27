@@ -9,6 +9,7 @@ Cada repositorio se revisó en un fork propio, en el SHA indicado. Todos los enl
 | 1 | [gothinkster/golang-gin-realworld-example-app](https://github.com/gothinkster/golang-gin-realworld-example-app) | [paopadp123/golang-gin-realworld-example-app](https://github.com/paopadp123/golang-gin-realworld-example-app) | `main` | `626c372d259472148d93303f74aa9b9a1cdcef24` | 2026-01-04 | MIT |
 | 2 | [realworld-apps/aspnetcore-realworld-example-app](https://github.com/realworld-apps/aspnetcore-realworld-example-app) | [paopadp123/aspnetcore-realworld-example-app](https://github.com/paopadp123/aspnetcore-realworld-example-app) | `master` | `8aa617abed5dd645f8f9d99578a3e07b4e2e52e7` | 2026-10-15 | MIT |
 | 3 | [reck1ess/next-realworld-example-app](https://github.com/reck1ess/next-realworld-example-app) | [paopadp123/next-realworld-example-app](https://github.com/paopadp123/next-realworld-example-app) | `master` | `be9ef569bc395975d98c1973fac23ba9277797e7` | 2020-08-06 | Sin licencia declarada |
+| 4 | [mauron85/react-native-background-geolocation](https://github.com/mauron85/react-native-background-geolocation) | [paopadp123/react-native-background-geolocation](https://github.com/paopadp123/react-native-background-geolocation) | `master` | `f0d434291cfae4a0e510e1e7a05d4e1e7508870e` | 2020-10-06 | Apache 2.0 |
 
 ## Diferencias con el Anexo A (verificado el 2026-10-25)
 

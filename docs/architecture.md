@@ -129,7 +129,7 @@ Toda alarma que llama a guardia tiene un runbook enlazado. Si una alarma se igno
 
 ## 6. Costo mensual estimado
 
-Supuestos: un solo entorno productivo en `us-east-1`, precios de lista aproximados de 2026 (hay que confirmarlos en AWS Pricing Calculator), sin planes de ahorro, y **un mensaje de telemetría por vehículo y minuto** (con las posiciones del minuto agrupadas, unos 200 bytes).
+Supuestos: un solo entorno productivo en `us-east-1`, precios de lista aproximados de 2026 (hay que confirmarlos en AWS Pricing Calculator), sin planes de ahorro, y **un mensaje de telemetría por vehículo y minuto** (con las posiciones del minuto agrupadas, unos 200 bytes), las 24 horas. Es la cota superior: la app solo envía con el vehículo en movimiento (README, sección 5).
 
 | Partida | Supuesto | US$/mes |
 |---|---|---|
