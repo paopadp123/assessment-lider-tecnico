@@ -24,24 +24,39 @@ export const RETRY_BASE_MS = 2_000;
 export const RETRY_MAX_MS = 60_000;
 
 export function createAlert(id: string, tripId: string, plate: string, now: number): DriverAlert {
-  throw new Error('not implemented');
+  return { id, tripId, plate, type: 'PANIC', occurredAt: new Date(now).toISOString(), status: 'pending', attempts: 0, nextAttemptAt: now };
 }
 
 /** Espera antes del siguiente intento: exponencial con tope y jitter completo. */
 export function retryDelay(attempts: number, random: () => number): number {
-  throw new Error('not implemented');
+  const ceiling = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.max(0, attempts - 1));
+  return Math.floor(random() * ceiling);
 }
 
 /** Aplica el resultado de un envío a la alerta. */
 export function applyResult(alert: DriverAlert, result: SendResult, now: number, random: () => number): DriverAlert {
-  throw new Error('not implemented');
+  const attempts = alert.attempts + 1;
+  switch (result.kind) {
+    case 'sent':
+      return { ...alert, attempts, status: 'sent', sentAt: new Date(now).toISOString(), lastError: undefined };
+    case 'rejected':
+      return { ...alert, attempts, status: 'rejected', lastError: result.reason };
+    case 'retry':
+      return { ...alert, attempts, status: 'pending', lastError: result.reason, nextAttemptAt: now + Math.max(1, retryDelay(attempts, random)) };
+  }
 }
 
 /** Traduce la respuesta del servidor. Solo 400 y 409 son definitivos: reintentar no los arregla. */
 export function classifyStatus(status: number): SendResult {
-  throw new Error('not implemented');
+  if (status === 200 || status === 201) {
+    return { kind: 'sent' };
+  }
+  if (status === 400 || status === 409) {
+    return { kind: 'rejected', reason: `HTTP ${status}` };
+  }
+  return { kind: 'retry', reason: `HTTP ${status}` };
 }
 
 export function isDue(alert: DriverAlert, now: number): boolean {
-  throw new Error('not implemented');
+  return alert.status === 'pending' && alert.nextAttemptAt <= now;
 }
