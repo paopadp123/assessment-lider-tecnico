@@ -120,6 +120,7 @@ Regla clave: **una orden pagada nunca pasa a FAILED.** Si no hay póliza, queda 
 ├── issuing-service/   capa anticorrupción C# (Domain, Application, Legacy, Http) y pruebas xUnit
 ├── console/           consola Next.js (app/, components/, lib/server = BFF, lib/client)
 ├── simulator/         cotizador, PSP y emisor legado simulados, con /chaos
+├── mobile/            app React Native del conductor (prototipo, bonus del Bloque 3)
 ├── scripts/           generación del .env y escenarios E2E
 ├── docs/              ADR, guion de la demo, bitácora de IA, capturas
 ├── review/            informe del code review (Bloque 2)
@@ -141,6 +142,8 @@ Regla clave: **una orden pagada nunca pasa a FAILED.** Si no hay póliza, queda 
 ## 5. Arquitectura móvil
 
 **Decisión sobre la librería:** no adoptamos `mauron85/react-native-background-geolocation` (sin código nuevo desde 2019; falla al iniciar en Android 12+ y no declara lo que Android 14 exige). Recomendamos Transistorsoft v5 tras un piloto, con `expo-location` como plan B. Evidencia, costo total a 3 años y condiciones de reversión en el [memorando](docs/mobile-memo.md).
+
+**Prototipo funcional** ([`mobile/`](mobile/README.md)): app React Native 0.86.2 conectada al orquestador, con estado de conexión, viaje actual, botón de pánico e historial local. Implementa en pequeño el reto offline de abajo: la alerta se guarda primero en el teléfono, se envía con un UUID propio (`POST /driver/alerts` es idempotente por ese id) y se reintenta con espera exponencial y jitter. Verificada con el APK de release en un emulador: con el orquestador apagado queda pendiente y, al volver, llega una sola vez.
 
 Esquema de reporte que asumen las cuatro respuestas: **una posición cada 10 s mientras el vehículo se mueve, agrupadas en un mensaje MQTT por minuto** hacia AWS IoT Core, como en [`docs/architecture.md`](docs/architecture.md). Detenido, no se envían posiciones. La arquitectura dimensiona el costo con envíos las 24 horas: es la cota superior.
 

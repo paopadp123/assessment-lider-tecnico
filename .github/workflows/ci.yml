@@ -118,6 +118,35 @@ jobs:
       - name: Build
         run: npm run build
 
+  mobile:
+    name: Mobile (React Native)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint -- --max-warnings 0
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # La compilación de Android no corre aquí (requiere el SDK y ~10 min); se verifica con el APK de release
+      # en el emulador (mobile/README.md).
+      - name: Test
+        run: npm test -- --ci
+
   console:
     name: Console (Next.js)
     runs-on: ubuntu-latest

@@ -21,6 +21,7 @@ type Handlers struct {
 	Login    *Login
 	Ops      *Ops
 	Console  *Console
+	Driver   *Driver
 	Breakers http.HandlerFunc
 	Ready    http.HandlerFunc
 	Require  func(http.HandlerFunc) http.HandlerFunc
@@ -39,6 +40,7 @@ func Routes(r Router, h Handlers) {
 	h.Login.Register(r)
 	h.Ops.Register(r, h.Require)
 	h.Console.Register(r, h.Require)
+	h.Driver.Register(r)
 }
 
 // WithCorrelation asegura que cada solicitud tenga un correlation-id: usa el del cliente si es válido o
