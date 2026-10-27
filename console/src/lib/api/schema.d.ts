@@ -469,6 +469,64 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/driver/alerts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Alerta de la app del conductor (botón de pánico, prototipo móvil)
+         * @description Idempotente por `alertId`, que genera el teléfono al crear la alerta: la cola offline la reintenta
+         *     hasta recibir 201 o 200. Autenticación de prototipo con un token de dispositivo (`DRIVER_DEVICE_TOKEN`);
+         *     en producción, un certificado por vehículo.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["DriverAlert"];
+                };
+            };
+            responses: {
+                /** @description Reintento de una alerta ya registrada */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DriverAlertReceipt"];
+                    };
+                };
+                /** @description Alerta registrada */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DriverAlertReceipt"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                409: components["responses"]["Conflict"];
+                500: components["responses"]["InternalError"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/ops/breakers": {
         parameters: {
             query?: never;
@@ -756,6 +814,23 @@ export interface components {
             token: string;
             /** Format: date-time */
             expiresAt: string;
+        };
+        DriverAlert: {
+            /** Format: uuid */
+            alertId: string;
+            /** @example ABC123 */
+            plate: string;
+            tripId: string;
+            /** @enum {string} */
+            type: "PANIC";
+            /** Format: date-time */
+            occurredAt: string;
+        };
+        DriverAlertReceipt: {
+            /** Format: uuid */
+            alertId: string;
+            /** @enum {string} */
+            status: "RECEIVED";
         };
         BreakerStatus: {
             name: string;

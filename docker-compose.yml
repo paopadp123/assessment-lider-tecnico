@@ -73,6 +73,8 @@ services:
       ISSUER_URL: http://issuing-service:8080
       PSP_WEBHOOK_SECRET: ${PSP_WEBHOOK_SECRET:?falta PSP_WEBHOOK_SECRET en .env (corre scripts/dev-env.sh)}
       JWT_SECRET: ${JWT_SECRET:?falta JWT_SECRET en .env (corre scripts/dev-env.sh)}
+      # Opcional: sin él, la API de la app del conductor (mobile/) responde 401.
+      DRIVER_DEVICE_TOKEN: ${DRIVER_DEVICE_TOKEN:-}
       OPS_BOOTSTRAP_USER: ${OPS_BOOTSTRAP_USER:-}
       OPS_BOOTSTRAP_NAME: ${OPS_BOOTSTRAP_NAME:-}
       OPS_BOOTSTRAP_PASSWORD: ${OPS_BOOTSTRAP_PASSWORD:-}

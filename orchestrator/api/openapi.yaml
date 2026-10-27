@@ -15,6 +15,7 @@ tags:
   - name: pagos
   - name: operación
   - name: salud
+  - name: conductor
 
 paths:
   /orders:
@@ -258,6 +259,36 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "500": { $ref: "#/components/responses/InternalError" }
 
+  /driver/alerts:
+    post:
+      tags: [conductor]
+      summary: Alerta de la app del conductor (botón de pánico, prototipo móvil)
+      description: |
+        Idempotente por `alertId`, que genera el teléfono al crear la alerta: la cola offline la reintenta
+        hasta recibir 201 o 200. Autenticación de prototipo con un token de dispositivo (`DRIVER_DEVICE_TOKEN`);
+        en producción, un certificado por vehículo.
+      security: [{ deviceToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DriverAlert" }
+      responses:
+        "201":
+          description: Alerta registrada
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DriverAlertReceipt" }
+        "200":
+          description: Reintento de una alerta ya registrada
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DriverAlertReceipt" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
   /ops/breakers:
     get:
       tags: [operación]
@@ -320,6 +351,10 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
+    deviceToken:
+      type: http
+      scheme: bearer
+      description: Token de dispositivo de la app del conductor (prototipo)
 
   parameters:
     OrderId:
@@ -496,6 +531,25 @@ components:
       properties:
         token: { type: string }
         expiresAt: { type: string, format: date-time }
+
+    DriverAlert:
+      type: object
+      additionalProperties: false
+      required: [alertId, plate, tripId, type, occurredAt]
+      properties:
+        alertId: { type: string, format: uuid }
+        plate: { type: string, example: ABC123 }
+        tripId: { type: string, pattern: "^[A-Za-z0-9._:-]{1,64}$" }
+        type: { type: string, enum: [PANIC] }
+        occurredAt: { type: string, format: date-time }
+
+    DriverAlertReceipt:
+      type: object
+      additionalProperties: false
+      required: [alertId, status]
+      properties:
+        alertId: { type: string, format: uuid }
+        status: { type: string, enum: [RECEIVED] }
 
     BreakerStatus:
       type: object

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -45,5 +46,16 @@ func NewReportDriverAlert(store DriverAlertStore, log *slog.Logger) *ReportDrive
 
 // Execute guarda la alerta. Un reintento de la misma alerta (la cola offline del teléfono) no la duplica.
 func (uc *ReportDriverAlert) Execute(ctx context.Context, a DriverAlert) (created bool, err error) {
-	return false, errors.New("not implemented")
+	created, err = uc.store.SaveDriverAlert(ctx, a)
+	if err != nil {
+		return false, fmt.Errorf("save driver alert: %w", err)
+	}
+	log := uc.log.With("alert_id", a.ID, "plate", a.Plate, "trip_id", a.TripID, "type", a.Type)
+	if !created {
+		log.Info("driver alert retried (already received)")
+		return false, nil
+	}
+	// WARN: es la señal que operaciones vigila. Un reintento del teléfono no la repite.
+	log.Warn("driver alert received", "occurred_at", a.OccurredAt)
+	return true, nil
 }
