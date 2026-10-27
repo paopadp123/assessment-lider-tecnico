@@ -1,0 +1,57 @@
+# HU-12: salida de go test en el commit en rojo y en el último arreglo
+# Generado con review/pruebas-en-vivo/hu12-rojo-verde.sh: clon limpio desde GitHub del fork, golang:1.27 en Linux (sqlite3 necesita CGO).
+
+### d2adb3c test: agrega pruebas en rojo de REV-GO-001, 002 y 004
+$ go version && go test -count=1 ./...
+go version go1.27.3 linux/amd64
+?   	github.com/gothinkster/golang-gin-realworld-example-app	[no test files]
+ok  	github.com/gothinkster/golang-gin-realworld-example-app/articles	4.763s
+--- FAIL: TestLoadJWTSecretFailsWithoutEnv (0.00s)
+        	Error:      	An error is expected but got nil.
+        	Messages:   	the server must not start without JWT_SECRET
+--- FAIL: TestLoadJWTSecretRejectsShortSecret (0.00s)
+        	Error:      	An error is expected but got nil.
+        	Messages:   	a short secret can be brute-forced offline
+--- FAIL: TestLoadJWTSecretUsesEnvValue (0.00s)
+        	Error:      	Not equal: 
+        	            	expected: []byte{0x65, 0x76, 0x54, 0x6d, 0x4f, 0x32, 0x59, 0x7a, 0x31, 0x66, 0x37, 0x62, 0x6d, 0x34, 0x46, 0x51, 0x53, 0x44, 0x35, 0x63, 0x7a, 0x59, 0x70, 0x69, 0x73, 0x77, 0x4e, 0x34, 0x75, 0x59, 0x37, 0x50, 0x55, 0x53, 0x6b, 0x47, 0x6c, 0x4b, 0x64, 0x4c, 0x34, 0x31, 0x56, 0x55, 0x4c, 0x4a, 0x79, 0x76}
+        	            	actual  : []byte{0x41, 0x20, 0x53, 0x74, 0x72, 0x69, 0x6e, 0x67, 0x20, 0x56, 0x65, 0x72, 0x79, 0x20, 0x56, 0x65, 0x72, 0x79, 0x20, 0x56, 0x65, 0x72, 0x79, 0x20, 0x53, 0x74, 0x72, 0x6f, 0x6e, 0x67, 0x21, 0x21, 0x40, 0x23, 0x23, 0x24, 0x21, 0x40, 0x23, 0x24}
+        	Messages:   	tokens must be signed with the configured secret
+--- FAIL: TestNewValidatorErrorWithMalformedJSON (0.00s)
+        	Error:      	func (assert.PanicTestFunc)(0x866a40) should not panic
+        	Messages:   	a non-validation error must not panic
+        	Error:      	map[string]interface {}(nil) does not contain "body"
+        	Messages:   	the client should learn that the body is invalid
+--- FAIL: TestBindErrorStatus (0.00s)
+        	Error:      	Not equal: 
+        	            	expected: 400
+        	            	actual  : 422
+        	Messages:   	malformed JSON is a client error, not a validation error
+FAIL	github.com/gothinkster/golang-gin-realworld-example-app/common	0.024s
+--- FAIL: TestUsersLoginWithMalformedJSONReturns400 (0.00s)
+        	Error:      	func (assert.PanicTestFunc)(0x87ff60) should not panic
+        	Messages:   	malformed JSON must not panic the handler
+        	Error:      	Not equal: 
+        	            	expected: 400
+        	            	actual  : 200
+        	Messages:   	malformed JSON should return 400
+--- FAIL: TestAuthMiddlewareRejectsTokenOfMissingUser (0.24s)
+        	Error:      	Not equal: 
+        	            	expected: 401
+        	            	actual  : 200
+        	Messages:   	a token of a missing user should return 401
+--- FAIL: TestAuthMiddlewareOptionalTreatsMissingUserAsAnonymous (0.27s)
+        	Error:      	"{\"user_id\":99999}" does not contain "\"user_id\":0"
+        	Messages:   	a missing user should be treated as anonymous
+FAIL	github.com/gothinkster/golang-gin-realworld-example-app/users	4.601s
+pruebas que fallan: 8
+
+### 0fa93ed fix(auth): rechaza el token de un usuario que no existe
+$ go version && go test -count=1 ./...
+go version go1.27.3 linux/amd64
+?   	github.com/gothinkster/golang-gin-realworld-example-app	[no test files]
+ok  	github.com/gothinkster/golang-gin-realworld-example-app/articles	4.170s
+ok  	github.com/gothinkster/golang-gin-realworld-example-app/common	0.019s
+ok  	github.com/gothinkster/golang-gin-realworld-example-app/users	4.196s
+pruebas que fallan: 0
+
