@@ -1,0 +1,34 @@
+{
+  "consumer": "orchestrator",
+  "provider": "simulator",
+  "interactions": [
+    {
+      "name": "quote a vehicle",
+      "providerState": "calm",
+      "request": {
+        "method": "POST",
+        "path": "/v1/quotes",
+        "body": { "plate": "ABC123", "vehicleYear": 2020, "cityCode": "11001", "documentId": "1020304050" }
+      },
+      "response": {
+        "status": 200,
+        "body": { "quoteId": "qt_1", "premium": 412000, "currency": "COP", "validUntil": "2099-12-31T23:59:59.000Z" }
+      },
+      "exact": ["currency"],
+      "consumerExpects": "quoted"
+    },
+    {
+      "name": "create a payment intent",
+      "providerState": "calm",
+      "request": {
+        "method": "POST",
+        "path": "/v1/payments",
+        "headers": { "Idempotency-Key": "order-1" },
+        "body": { "quoteId": "qt_1", "amount": 412000.0, "currency": "COP", "customerRef": "order-1" }
+      },
+      "response": { "status": 202, "body": { "paymentId": "pay_1", "status": "PENDING" } },
+      "exact": ["status"],
+      "consumerExpects": "accepted"
+    }
+  ]
+}
