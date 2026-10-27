@@ -111,6 +111,8 @@ Regla clave: **una orden pagada nunca pasa a FAILED.** Si no hay póliza, queda 
 | `internal/httpapi` | Rutas, firma HMAC del webhook, JWT, SSE, health checks y contrato OpenAPI |
 | `internal/auth`, `internal/trace` | Login con bcrypt y JWT; correlation-id en el contexto y en los logs |
 
+**Arquitectura objetivo en AWS** (Bloque 4): en [`docs/architecture.md`](docs/architecture.md), con el diagrama, la justificación de cómputo, mensajería, persistencia y borde, los secretos, los SLI/SLO, el costo, el primer cuello de botella y el borrado según la Ley 1581. La IaC está en [`infra/terraform/messaging`](infra/terraform/messaging).
+
 **Estructura del repositorio**
 
 ```

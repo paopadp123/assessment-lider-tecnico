@@ -175,3 +175,24 @@ jobs:
       - name: Stop
         if: always()
         run: docker compose down -v
+
+  terraform:
+    name: Infra (Terraform)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/terraform/messaging
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+
+      - name: Formato
+        run: terraform fmt -check -recursive
+
+      - name: Validación (sin backend ni credenciales)
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
