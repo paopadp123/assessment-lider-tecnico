@@ -123,6 +123,7 @@ Regla clave: **una orden pagada nunca pasa a FAILED.** Si no hay póliza, queda 
 ├── scripts/           generación del .env y escenarios E2E
 ├── docs/              ADR, guion de la demo, bitácora de IA, capturas
 ├── review/            informe del code review (Bloque 2)
+├── lead/              liderazgo técnico: plan 30-60-90, métricas, deuda y estimación (Bloque 5)
 ├── docker-compose.yml
 └── .github/workflows/ CI por servicio y job E2E
 ```
@@ -135,6 +136,7 @@ Regla clave: **una orden pagada nunca pasa a FAILED.** Si no hay póliza, queda 
 - [ADR 0005 — Login JWT para los operadores de la consola](docs/adr/0005-login-jwt-de-operadores.md)
 - [ADR 0006 — Un correlation-id por compra, guardado con la orden](docs/adr/0006-correlation-id-por-compra.md)
 - [ADR 0007 — Consola con BFF y cookie httpOnly; registro de llamadas a terceros](docs/adr/0007-consola-bff-y-llamadas-a-terceros.md)
+- [ADR 0008 — Go y C#: regla de asignación y un solo dueño por regla de negocio](docs/adr/0008-go-y-csharp-regla-de-asignacion.md) (Bloque 5; el resto del bloque está en [`lead/README.md`](lead/README.md))
 
 ## 5. Arquitectura móvil
 
