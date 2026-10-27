@@ -8,10 +8,13 @@ Compra de una póliza vehicular digital que cruza tres terceros que fallan de fo
 | `issuing-service/` | Capa anticorrupción del emisor (C# / .NET) |
 | `console/` | Consola de operaciones (Next.js + TypeScript) |
 | `simulator/` | Simuladores de terceros e inyección de caos |
-| `infra/` | Infraestructura como código |
-| `review/` | Informe de code review |
-| `lead/` | Liderazgo técnico |
-| `docs/adr/` | Decisiones de arquitectura |
+| `mobile/` | App React Native del conductor (prototipo, bonus del Bloque 3) |
+| `contracts/` | Contratos compartidos entre servicios (pruebas de contrato, bonus) |
+| `infra/` | Infraestructura como código (Terraform de la cola de emisión) |
+| [`review/`](review/README.md) | Informe de code review (Bloque 2) |
+| [`lead/`](lead/README.md) | Liderazgo técnico (Bloque 5) |
+| [`docs/adr/`](docs/adr) | Decisiones de arquitectura (ADR 0001–0008) |
+| [`docs/`](docs) | Arquitectura en AWS, memorando móvil, guion de la demo y bitácora de IA |
 
 ## 1. Cómo levantar todo en un comando
 Requisitos: Docker con Compose v2, bash (en Windows, Git Bash), `curl`, `jq` y `openssl`.
@@ -33,7 +36,7 @@ bash scripts/e2e/run-all.sh              # los 4 escenarios de punta a punta (~1
 Los escenarios (compra feliz, timeout pero emitió, caída del emisor con recuperación y pago aprobado con emisión rechazada) están en [`docs/demo.md`](docs/demo.md), que también es el guion del video. El CI los corre en cada push (job `e2e`). La consola está documentada en [`console/README.md`](console/README.md).
 
 ## 2. Video de sustentación
-_Pendiente._
+_El enlace (YouTube, no listado) se agrega al grabarlo._ Agenda: arquitectura y las dos decisiones de las que más orgulloso estoy, demostración en vivo (compra exitosa y compra que falla y se recupera), el hallazgo más importante del code review, la decisión sobre la librería móvil y qué haría distinto con un mes y un equipo.
 
 ## 3. Arquitectura
 
@@ -99,7 +102,7 @@ stateDiagram-v2
     FAILED --> [*]
 ```
 
-Regla clave: **una orden pagada nunca pasa a FAILED.** Si no hay póliza, queda en `REFUND_REQUIRED` y operaciones decide desde la consola, con la acción auditada.
+Regla clave: **una orden pagada nunca pasa a FAILED.** Si el emisor la rechaza por negocio (422), queda en `REFUND_REQUIRED` y operaciones decide desde la consola, con la acción auditada. Si se agotan los reintentos por fallas transitorias, queda en `ISSUING`: un timeout no prueba que la póliza no exista, y la reconciliación consulta al emisor antes de decidir (ADR 0003 y 0004).
 
 **Orquestador en Go** (hexagonal liviana: las dependencias apuntan hacia `order`):
 
@@ -138,6 +141,18 @@ Regla clave: **una orden pagada nunca pasa a FAILED.** Si no hay póliza, queda 
 - [ADR 0006 — Un correlation-id por compra, guardado con la orden](docs/adr/0006-correlation-id-por-compra.md)
 - [ADR 0007 — Consola con BFF y cookie httpOnly; registro de llamadas a terceros](docs/adr/0007-consola-bff-y-llamadas-a-terceros.md)
 - [ADR 0008 — Go y C#: regla de asignación y un solo dueño por regla de negocio](docs/adr/0008-go-y-csharp-regla-de-asignacion.md) (Bloque 5; el resto del bloque está en [`lead/README.md`](lead/README.md))
+
+Otras piezas con decisiones propias: el [informe del code review](review/README.md), la [arquitectura en AWS](docs/architecture.md), el [memorando móvil](docs/mobile-memo.md) y las [pruebas de contrato](contracts/README.md).
+
+### Por qué no hay reembolso automático
+
+La orden llega a `REFUND_REQUIRED` cuando el pago quedó aprobado y el emisor rechazó la emisión por una regla de negocio (respuesta 422 de la capa de emisión; ADR 0003). Ahí queda visible en la consola y **una persona decide**. Es la decisión correcta por cinco razones:
+
+1. **El rechazo puede tener arreglo.** En la simulación, los rechazos son placa con formato inválido y vehículo con póliza vigente. El primero se corrige con el dato bien escrito; el segundo puede ser la póliza del mismo cliente emitida en un intento anterior, y la capa de emisión ya lo confirma con una consulta antes de responder. La consola permite reintentar la emisión; un reembolso automático cerraría ese camino a un cliente que pagó por una póliza.
+2. **El reembolso es irreversible.** El emisor a veces responde tarde aunque sí emitió. Un reembolso automático podría devolverle el dinero a un cliente que ya quedó asegurado. El sistema evita reemitir a ciegas (consulta por `externalRef` antes de reintentar); reembolsar a ciegas sería el mismo error, con dinero.
+3. **Mover dinero necesita una decisión con responsable.** Un reembolso tiene efectos contables y, como práctica general, lo aprueba alguien distinto del proceso que lo originó. Aquí la acción del operador queda registrada con su usuario en la línea de tiempo de la orden (ADR 0005).
+4. **Se vigila sin automatizarlo.** El SLO "ningún pago sin resolver" mide que cada orden pagada tenga póliza o una acción de operador en 30 minutos, y hay una alerta para las que esperan una acción ([`docs/architecture.md`](docs/architecture.md), sección 5). El SLO es una meta, no una garantía: si se incumple, la alerta lo hace visible.
+5. **Se puede automatizar después, con evidencia.** Si los datos muestran una categoría de rechazo que durante meses nunca terminó en emisión, esa categoría se automatiza con un reembolso idempotente por `orderId`. Primero se mide; después se automatiza.
 
 ## 5. Arquitectura móvil
 
@@ -559,4 +574,26 @@ Antigravity hizo la primera pasada sobre los tres repositorios con las áreas de
 **4. Practicantes.** Las primeras dos semanas resuelven sus tareas de aprendizaje sin generar código con IA; pueden usarla como tutor, pidiendo explicaciones y no soluciones. Después, cada PR suyo con código generado incluye, en sus palabras, qué hace y por qué así, y en la revisión con su mentor se defiende sin la herramienta abierta. Una vez al mes, una tarea de depuración sin IA. La señal de dependencia sin criterio no es usar la IA: es no poder explicar ni depurar lo que entregó.
 
 ## 7. Decisiones y renuncias
-_Pendiente._
+
+Esto es lo que dejé fuera a propósito, por qué y qué haría con más tiempo. El criterio fue terminar con pruebas lo obligatorio y los bonus antes de abrir algo nuevo.
+
+| Qué quedó fuera | Por qué | Con más tiempo |
+|---|---|---|
+| **Validar la telemetría antes de cotizar** (sección 4.4, opcional) | No tiene peso fijo y tocaba el flujo de compra, que ya estaba estable con los escenarios de punta a punta en verde. Prioricé terminar los bloques obligatorios y los bonus. | Un cuarto tercero en el simulador con caos, un cliente con timeout, reintentos y breaker, y un ADR sobre qué hacer si la telemetría no responde: cotizar igual y marcar la orden (*fail-open*) o rechazar (*fail-closed*). Me inclino por *fail-open* con revisión posterior: un servicio de apoyo caído no debería detener las ventas. |
+| **Despliegue real en AWS** | No hay una cuenta de AWS para la prueba. El Terraform cubre el componente crítico (la cola de emisión con DLQ, IAM y alarmas) y el CI lo valida con `fmt` y `validate`, sin `plan` ni `apply`. | Módulos de red, ECS y Aurora, `plan` en cada PR con OIDC de GitHub y `apply` aprobado a mano en staging. |
+| **Rotación de secretos con doble llave** (webhook del PSP y JWT) | Está diseñada ([`docs/architecture.md`](docs/architecture.md), sección 4), pero el código acepta una sola llave. Rotar hoy exige una ventana. | Aceptar la firma con la llave actual y la anterior, y firmar solo con la actual. |
+| **La métrica de la orden pagada sin póliza más antigua** | La alarma de guardia del Terraform la usa, pero el orquestador todavía no la publica: está diseñada, no implementada. | Publicarla desde el reconciliador cada minuto. |
+| **Estado en memoria por réplica** (breaker y límite de intentos del login) | Correcto con una réplica, que es lo que corre aquí. Con N réplicas, cada una aprende la caída por su cuenta y el límite de intentos se multiplica por N (ADR 0003 y 0005). | El límite de intentos pasa a AWS WAF. El breaker por réplica se acepta (5·N llamadas fallidas como máximo) o se comparte su estado. |
+| **Roles y revocación de operadores** | Todos los operadores pueden hacer todo y un token vive 60 minutos (ADR 0005). Suficiente para la consola de la prueba. | Roles (ver frente a actuar sobre una orden) y una lista de revocación. |
+| **Trazas distribuidas (OpenTelemetry)** | El correlation-id por compra ya permite seguir una compra completa en los logs (ADR 0006). OpenTelemetry agrega infraestructura sin cambiar lo que se puede responder hoy. | OpenTelemetry encima del correlation-id, para medir el tiempo de cada salto. |
+| **Contrato del webhook del PSP** | Las pruebas de contrato cubren las llamadas entre servicios. El webhook (el simulador llama al orquestador) lo cubren las pruebas de cada lado y el escenario de punta a punta, no un contrato compartido. | Agregarlo a `contracts/`, con la firma HMAC. |
+| **Pruebas de carga** | El bonus pide pruebas de contrato o de carga, y elegí las de contrato: detectan rupturas entre servicios en cada PR, mientras que una prueba de carga contra un compose local diría poco sobre producción. | k6 a 50 solicitudes por segundo contra staging, midiendo el p95 de la creación y cómo crece la cola de emisión con el emisor degradado. |
+| **Prototipo móvil incompleto** | Se verificó en Android. iOS no se compiló, no tiene GPS (es la decisión del memorando), las alertas no aparecen en la consola y el gesto de mantener 2 s no tiene prueba automática. | Piloto con la librería del memorando, iOS y una vista de alertas en la consola. |
+| **Deuda del PR en el fork de golang-gin** | El PR corrige los hallazgos más severos. Quedan para un segundo PR: responder 503 (no 401) cuando cae la base, documentar en vez de silenciar un aviso del linter y una línea desactualizada de `AGENTS.md` ([`review/README.md`](review/README.md)). | Ese segundo PR, con sus pruebas. |
+
+**Con un mes y un equipo,** en este orden:
+1. **Staging en AWS** con todo el Terraform y despliegue continuo: lo que no corre en un ambiente parecido a producción no está probado de verdad.
+2. **Observabilidad real:** las métricas de los SLO, la métrica de la orden pagada sin póliza y OpenTelemetry. Hoy el sistema se puede depurar; todavía no se puede operar con alertas.
+3. **Seguridad operativa:** rotación con doble llave, roles de operadores y el límite de intentos en WAF.
+4. **La telemetría** (sección 4.4) y el **piloto móvil** con 50 vehículos, para medir batería, datos y posiciones perdidas antes de decidir la librería en firme.
+5. **Pruebas de carga y de caos en staging**, para validar el primer cuello de botella que predice la arquitectura (el emisor legado).
