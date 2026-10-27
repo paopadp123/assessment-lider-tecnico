@@ -5,7 +5,8 @@ using System.Text.Json;
 namespace Issuing.UnitTests.Support;
 
 /// <summary>Una solicitud que la ACL le hizo al emisor legado.</summary>
-public sealed record LegacyCall(string Path, string? CorrelationId, string Body);
+/// <summary>Una llamada al legado. Query incluye el "?" inicial, o es vacía.</summary>
+public sealed record LegacyCall(string Path, string? CorrelationId, string Body, string Query = "");
 
 /// <summary>
 /// Emisor legado falso con respuestas programadas por ruta. Si no hay nada programado, la consulta responde
@@ -93,7 +94,7 @@ public sealed class FakeLegacyIssuer : HttpMessageHandler
         string? correlation = request.Headers.TryGetValues("X-Correlation-ID", out IEnumerable<string>? values) ? values.Single() : null;
         lock (_calls)
         {
-            _calls.Add(new LegacyCall(path, correlation, body));
+            _calls.Add(new LegacyCall(path, correlation, body, request.RequestUri?.Query ?? string.Empty));
         }
 
         string externalRef = path == "/policies" ? request.RequestUri!.Query.Split('=')[1] : string.Empty;
