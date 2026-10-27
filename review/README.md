@@ -62,6 +62,8 @@ Cada hallazgo usa la plantilla del Anexo C. Los marcados como **probado en vivo*
 
 Origen: humano (pista de `AGENTS.md:112`, confirmada leyendo el código); prueba en vivo preparada con Claude Code.
 
+**Corregido** en el [PR #1 del fork](https://github.com/paopadp123/golang-gin-realworld-example-app/pull/1), commit [`737f065`](https://github.com/paopadp123/golang-gin-realworld-example-app/commit/737f065).
+
 #### REV-GO-002 — Un JSON mal formado produce un panic y responde 500 en vez de 400
 
 | Campo | Contenido |
@@ -77,6 +79,8 @@ Origen: humano (pista de `AGENTS.md:112`, confirmada leyendo el código); prueba
 | ¿Bloquea el merge? | No por sí solo (Recovery evita la caída), pero se corrige en el mismo sprint: es la puerta de entrada pública (login y registro) |
 
 Origen: humano (detectó la falta de manejo de errores en `utils.go`) con apoyo de Claude Code, que precisó la línea y el mecanismo del panic.
+
+**Corregido** en el [PR #1 del fork](https://github.com/paopadp123/golang-gin-realworld-example-app/pull/1), commit [`94f95d2`](https://github.com/paopadp123/golang-gin-realworld-example-app/commit/94f95d2).
 
 #### REV-GO-003 — El middleware de autenticación hace panic si el claim `id` no es numérico
 
@@ -109,6 +113,8 @@ Origen: Claude Code, confirmado en vivo.
 | ¿Bloquea el merge? | **Sí** en producción: es el punto donde se decide quién está autenticado. *Aceptable en un ejemplo* que nunca borra usuarios, **inaceptable en producción** |
 
 Origen: humano (siguió el flujo desde `serializers.go` hasta el middleware) con apoyo de Claude Code, que encontró la línea y lo probó en vivo.
+
+**Corregido** en el [PR #1 del fork](https://github.com/paopadp123/golang-gin-realworld-example-app/pull/1), commit [`0fa93ed`](https://github.com/paopadp123/golang-gin-realworld-example-app/commit/0fa93ed).
 
 #### REV-GO-005 — Contrato implícito en el contexto: claves de texto, `MustGet` y orden de las rutas
 
@@ -555,6 +561,32 @@ Origen: IA (Antigravity) **confirmado y ampliado**: lo reportó solo en el login
 - La caché con SWR y `initialData` desde `getInitialProps` da una primera carga renderizada en el servidor y actualización en el cliente, un patrón razonable para la época.
 
 **Pista no comprobada:** `pages/user/settings.tsx:9-21` decide en el servidor si hay sesión leyendo `localStorage` (que no existe en el servidor), y `getInitialProps` devuelve el objeto `res` para serializarlo. Es probable que al recargar `/user/settings` siempre redirija al inicio, pero no se probó y no se reporta como hallazgo.
+
+## Pull request en el fork y puertas de calidad
+
+**Repositorio elegido:** golang-gin, porque tiene el único hallazgo Crítico de los tres y los defectos más fáciles de demostrar con una prueba que falla.
+
+- **Pull request:** [paopadp123/golang-gin-realworld-example-app/pull/1](https://github.com/paopadp123/golang-gin-realworld-example-app/pull/1) (`fix/hallazgos-criticos` → `main` dentro del fork; ninguno contra el repositorio original).
+- **Ejecución verde del CI:** [run 40442866263](https://github.com/paopadp123/golang-gin-realworld-example-app/actions/runs/40442866263). Pruebas con Go 1.21, 1.22 y 1.23, `golangci-lint` v1.61, `gosec` y la prueba de la API con Newman (32 peticiones y 311 aserciones, 0 fallas).
+
+| Hallazgo | Severidad | Arreglo | Commit |
+|---|---|---|---|
+| REV-GO-001 | Crítica | El secreto se lee de `JWT_SECRET` (mínimo 32 bytes, sin valor por defecto) y la aplicación no arranca sin él | [`737f065`](https://github.com/paopadp123/golang-gin-realworld-example-app/commit/737f065) |
+| REV-GO-002 | Media | `errors.As` en lugar de la conversión sin verificar: un JSON mal formado responde 400 y no provoca un panic | [`94f95d2`](https://github.com/paopadp123/golang-gin-realworld-example-app/commit/94f95d2) |
+| REV-GO-004 | Media | El middleware responde 401 si el usuario del token no existe, o lo trata como anónimo si la autenticación es opcional | [`0fa93ed`](https://github.com/paopadp123/golang-gin-realworld-example-app/commit/0fa93ed) |
+
+**Rojo → verde:** el commit [`d2adb3c`](https://github.com/paopadp123/golang-gin-realworld-example-app/commit/d2adb3c) agrega 8 pruebas y stubs que compilan sin cambiar el comportamiento. Sobre un clon limpio del fork en Linux, en ese commit fallan exactamente esas 8 pruebas (dos de ellas por un panic) y en [`0fa93ed`](https://github.com/paopadp123/golang-gin-realworld-example-app/commit/0fa93ed) pasan las tres suites: salida en [`pruebas-en-vivo/hu12-rojo-verde.txt`](pruebas-en-vivo/hu12-rojo-verde.txt), reproducible con [`hu12-rojo-verde.sh`](pruebas-en-vivo/hu12-rojo-verde.sh). Localmente también pasaron con `go test -race` (el CI no usa `-race`). Los tres arreglos se probaron además con la aplicación corriendo: sin `JWT_SECRET` no arranca, un JSON roto responde 400 y un token firmado con el secreto que estaba publicado responde 401.
+
+**Lo que apareció en el camino (y por qué importa):**
+- **La suite comprobaba un defecto como si fuera correcto.** Dos casos de `TestWithoutAuth` enviaban un token de un usuario que no existe y esperaban que la petición llegara al handler. Con el arreglo de REV-GO-004 pasaron a esperar 401. Es REV-GO-006 en la práctica: cobertura alta sobre comportamientos equivocados.
+- **El CI del repositorio original estaba roto desde marzo de 2026 por una dependencia sin fijar.** El job de la API descargaba la colección de Postman desde una rama del repositorio de la especificación, que se mudó, cambió su contrato de errores (v2) y borró la colección. Se fijó a la versión contra la que se validó esta API ([`6fd7ded`](https://github.com/paopadp123/golang-gin-realworld-example-app/commit/6fd7ded)). Adoptar el contrato v2 queda como trabajo aparte: hoy falla 24 de sus 52 aserciones de errores.
+- **En este fork, los eventos `push` y `pull_request` no disparan Actions,** aunque están habilitadas. Se agregó `workflow_dispatch` ([`950eb77`](https://github.com/paopadp123/golang-gin-realworld-example-app/commit/950eb77)) y la ejecución verde se lanzó a mano sobre `main`, que ya incluye el PR.
+
+**Fuera de alcance (siguiente PR):**
+- REV-GO-003 baja a severidad Baja con este PR, porque sin el secreto publicado ya no se puede forjar el claim `id`.
+- Hoy el middleware responde 401 ante cualquier error de la base. Lo correcto es distinguir `gorm.ErrRecordNotFound` (401) de una caída de la base (503 y registro en el log).
+- `RandomPassword` conserva `#nosec G101`. Es un valor centinela y no un secreto, pero conviene documentarlo en vez de silenciar el aviso. `AGENTS.md:112` todavía dice que el secreto está en `common/utils.go`.
+- Los commits de CI (`950eb77` y `6fd7ded`) se hicieron directo sobre `main`, fuera del PR, para poder obtener la ejecución verde.
 
 ## Comparación entre los tres stacks
 
