@@ -611,3 +611,9 @@ Los tres repositorios implementan el mismo producto (RealWorld / Conduit). Las d
 - **Lo que se lleva al equipo:** (1) secretos obligatorios y validados al arrancar, como en C#; (2) un manejador central de errores con contrato fijo; (3) validación con límites en toda entrada pública (paginación, longitudes); (4) pruebas de los caminos de error; (5) un cliente HTTP único en el frontend; (6) revisar actividad, licencia y vulnerabilidades antes de adoptar una dependencia.
 
 **Licencias citadas:** golang-gin-realworld-example-app y aspnetcore-realworld-example-app, MIT (archivo `LICENSE` en la raíz de cada fork). next-realworld-example-app no declara licencia. Este informe solo cita fragmentos breves con fines de revisión y no redistribuye código de ninguno de los tres.
+
+## Para el equipo
+
+- [Mensaje al desarrollador](mensaje-al-desarrollador.md): el comentario para la persona senior que escribió el repositorio de Go (máximo 250 palabras).
+- [Checklist de PR y Definition of Done](checklist-pr.md): derivados de los hallazgos de este informe, listos para adoptar.
+- [Filtro técnico para un senior fullstack](filtro-senior.md): el ejercicio, las señales, cómo evaluar el uso de IA y qué no evaluar en una prueba.
