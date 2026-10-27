@@ -137,7 +137,42 @@ Regla clave: **una orden pagada nunca pasa a FAILED.** Si no hay póliza, queda 
 - [ADR 0007 — Consola con BFF y cookie httpOnly; registro de llamadas a terceros](docs/adr/0007-consola-bff-y-llamadas-a-terceros.md)
 
 ## 5. Arquitectura móvil
-_Pendiente._
+
+**Decisión sobre la librería:** no adoptamos `mauron85/react-native-background-geolocation` (sin código nuevo desde 2019; falla al iniciar en Android 12+ y no declara lo que Android 14 exige). Recomendamos Transistorsoft v5 tras un piloto, con `expo-location` como plan B. Evidencia, costo total a 3 años y condiciones de reversión en el [memorando](docs/mobile-memo.md).
+
+Esquema de reporte que asumen las cuatro respuestas: **una posición cada 10 s mientras el vehículo se mueve, agrupadas en un mensaje MQTT por minuto** hacia AWS IoT Core, como en [`docs/architecture.md`](docs/architecture.md). Detenido, no se envían posiciones. La arquitectura dimensiona el costo con envíos las 24 horas: es la cota superior.
+
+### Offline first: 10 minutos en un túnel
+- **Almacenar:** cada posición va primero a SQLite en el teléfono, nunca directo a la red. Lleva un `install_id` (UUID generado al instalar la app) y un `seq` creciente y persistido, más la hora del GPS. Si se reinstala la app, el `install_id` cambia y el `seq` puede volver a 0 sin chocar con lo anterior. La cola tiene un tope (7 días o 50.000 posiciones): si se llena, descarta las más viejas y cuenta cuántas descartó, para que el servidor lo sepa.
+- **Ordenar:** por `seq`, no por hora de llegada. Al reconectar, primero se envía **la posición más reciente** (la consola ve al vehículo de inmediato) y luego el atraso en orden.
+- **Lote:** 10 minutos son 60 posiciones, unos 1.000 bytes: cabe en **un solo mensaje**. Los atrasos largos se parten en lotes de hasta 300 posiciones (~4 KB).
+- **Compresión:** Protobuf con deltas de posición y tiempo (≈12 bytes por posición en lugar de ~120 en JSON). gzip solo para lotes de más de 4 KB: en mensajes pequeños, la cabecera de gzip pesa más de lo que ahorra.
+- **Backpressure:** MQTT QoS 1. El cliente manda el siguiente lote solo cuando recibe el `PUBACK` del anterior (máximo 2 en vuelo) y, si IoT Core lo limita o la conexión cae, reintenta con espera exponencial y jitter. Al reconectar espera un tiempo aleatorio de 0 a 60 s: cuando una celda vuelve, cientos de vehículos no deben llegar en el mismo segundo. Del lado del servidor, Kinesis absorbe la ráfaga (retiene 24 h) y el consumidor lee a su ritmo.
+- **Idempotencia en el servidor:** QoS 1 entrega *al menos una vez*, así que los duplicados son normales. La clave es `(vehicle_id, install_id, seq)`. La última posición en ElastiCache solo se actualiza si la hora del GPS es más reciente que la guardada: una posición vieja que llega tarde no mueve el vehículo hacia atrás. El histórico en Iceberg se deduplica por esa clave al compactar.
+
+### Batería
+- **Android:** `FusedLocationProvider` con prioridad alta solo durante el viaje y balanceada al detenerse. Con Activity Recognition, la app detiene las actualizaciones de GPS cuando el vehículo está quieto y las reanuda cuando se mueve. `setMaxUpdateDelayMillis` permite que el sistema agrupe las lecturas y despierte la app con menos frecuencia, una vez por lote. Servicio en primer plano de tipo `location` con su notificación (Android 14+). Guía para los fabricantes que matan procesos (Xiaomi, Huawei, Samsung): pedir la exención de optimización de batería solo en los dispositivos de la flota.
+- **iOS:** `activityType = .automotiveNavigation`, `pausesLocationUpdatesAutomatically` y *significant location changes* cuando el vehículo está detenido, para que el sistema despierte la app al volver a moverse. `CLBackgroundActivitySession` (iOS 17+) en lugar de mantener el GPS encendido sin necesidad.
+- **Producto:** se rastrea **durante el viaje**, no todo el día. Frecuencia adaptable (cada 10 s en carretera, cada 30 s en trancón) y configurable por flota desde el servidor. Un mensaje por minuto, no por posición: cada vez que el radio celular se enciende gasta energía varios segundos después de transmitir. Panel de batería por versión de la app para detectar regresiones.
+
+### Consumo de datos (límite: 20 MB por vehículo al mes)
+Supuestos: 10 horas de movimiento al día, 30 días, MQTT sobre TLS 1.3 con conexión persistente.
+
+| Concepto | Cálculo | MB al mes |
+|---|---|---|
+| Posiciones | 600 mensajes/día × 30 = 18.000 mensajes × ~400 B (≈200 B de posiciones con margen + ~200 B de MQTT, TLS, TCP y el `PUBACK`) | 7,2 |
+| Keepalive con el vehículo detenido | Un ping cada 20 min durante 14 h × 30 días × ~130 B | 0,2 |
+| Reconexiones (túneles, cambio de celda) | 20 por día × 30 × ~7 KB (handshake TLS con certificado de dispositivo) | 4,2 |
+| Configuración y comandos | Estimado | 0,2 |
+| **Subtotal** | | **11,8** |
+| **Con 30 % de retransmisiones y margen** | | **≈ 15,3** |
+
+**Cabe en 20 MB**, con dos condiciones. Con el mismo margen, reportar las 24 horas aunque el vehículo esté quieto da ≈ 28 MB (43.200 mensajes × 400 B + reconexiones y comandos, × 1,3): no cabe, por eso solo se envía en movimiento. Con HTTPS y JSON, cada petición pesaría ~1,6 KB (≈ 700 B de cabeceras de petición y respuesta, ≈ 600 B de JSON con 6 posiciones y ≈ 300 B de TCP y TLS): 18.000 × 1,6 KB + reconexiones, × 1,3 ≈ 43 MB. Por eso MQTT y Protobuf. Las actualizaciones de la app (2–5 MB cada una) se descargan solo por Wi-Fi y no cuentan en el plan. **El trade-off:** si negocio pide una posición por segundo (para calificar la conducción, por ejemplo), no cabe. Habría que calcular en el teléfono y enviar eventos (frenadas, excesos de velocidad) en lugar de posiciones crudas, o pagar un plan mayor.
+
+### Distribución y permisos
+- **Google Play exige hoy:** declarar el permiso de ubicación en segundo plano en Play Console (formulario de permisos de ubicación, en "Contenido de la app"), con un video corto del flujo en el dispositivo; una **divulgación destacada** dentro de la app, antes del diálogo del sistema, que diga "ubicación" y "incluso cuando la app está cerrada o no se está usando"; y política de privacidad en la app y en la ficha. En Android 11+, `ACCESS_BACKGROUND_LOCATION` se pide aparte, después del permiso en uso, y el usuario lo concede en Ajustes ("Permitir todo el tiempo"). Android 14 exige el tipo `location` en el servicio en primer plano y el permiso `FOREGROUND_SERVICE_LOCATION`. Desde el 31 de agosto de 2026 las actualizaciones deben apuntar a la API 36.
+- **Cómo reducir el riesgo de rechazo:** si el conductor inicia el viaje desde la app, un servicio en primer plano iniciado con la app visible puede usar solo el permiso **en uso**. Pedimos el de segundo plano solo si negocio necesita detectar viajes automáticamente, y lo justificamos en la declaración.
+- **Actualizaciones en una flota de miles:** dos canales. **OTA (EAS Update)** para cambios de JavaScript: la política de Google Play lo permite si no cambia el propósito de la app. Se publica por porcentajes (5 % → 25 % → 100 %) y se revierte solo si la tasa de crashes sube. **Tienda** para cualquier cambio nativo (permisos, SDK, la librería de ubicación), con el lanzamiento escalonado de Play. En teléfonos de la empresa, Managed Google Play (MDM) instala las actualizaciones sin depender del conductor. El servidor publica la **versión mínima soportada**: una app más vieja pide actualizarse en lugar de enviar datos con un protocolo que ya no se acepta. El backend acepta las dos últimas versiones del mensaje de telemetría.
 
 ## 6. Reporte de IA
 _Pendiente._ Bitácora en construcción en `docs/ai/`.
