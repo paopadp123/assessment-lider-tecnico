@@ -146,7 +146,7 @@ Otras piezas con decisiones propias: el [informe del code review](review/README.
 
 ### Por qué no hay reembolso automático
 
-La orden llega a `REFUND_REQUIRED` cuando el pago quedó aprobado y el emisor rechazó la emisión por una regla de negocio (respuesta 422 de la capa de emisión; ADR 0003). Ahí queda visible en la consola y **una persona decide**. Es la decisión correcta por cinco razones:
+La orden llega a `REFUND_REQUIRED` cuando el pago quedó aprobado y la póliza no se pudo emitir, por una de dos causas: el emisor rechazó la emisión por una regla de negocio (respuesta 422 de la capa de emisión; ADR 0003), o la reconciliación consultó al emisor en tres rondas, la póliza nunca apareció y la emisión se declaró fallida en definitiva (`orchestrator/internal/app/reconcile.go`). Ahí queda visible en la consola y **una persona decide**. Es la decisión correcta por cinco razones:
 
 1. **El rechazo puede tener arreglo.** En la simulación, los rechazos son placa con formato inválido y vehículo con póliza vigente. El primero se corrige con el dato bien escrito; el segundo puede ser la póliza del mismo cliente emitida en un intento anterior, y la capa de emisión ya lo confirma con una consulta antes de responder. La consola permite reintentar la emisión; un reembolso automático cerraría ese camino a un cliente que pagó por una póliza.
 2. **El reembolso es irreversible.** El emisor a veces responde tarde aunque sí emitió. Un reembolso automático podría devolverle el dinero a un cliente que ya quedó asegurado. El sistema evita reemitir a ciegas (consulta por `externalRef` antes de reintentar); reembolsar a ciegas sería el mismo error, con dinero.
