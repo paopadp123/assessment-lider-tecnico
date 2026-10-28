@@ -85,6 +85,15 @@ func (r *OrderRepository) RecordPaymentEvent(ctx context.Context, ev app.Payment
 			RETURNING id`, string(ev.PaymentID), string(ev.Status), ev.OccurredAt).Scan(&eventID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			res = app.PaymentEventResult{Outcome: app.PaymentDuplicate}
+			// Sin bloqueo: solo se lee la orden para que el log del reenvío lleve el correlation-id de la compra.
+			o, err := loadOrder(ctx, tx, "payment_id = $1", string(ev.PaymentID))
+			if errors.Is(err, app.ErrOrderNotFound) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			res.OrderID, res.CorrelationID = o.ID, o.CorrelationID
 			return nil
 		}
 		if err != nil {
@@ -93,6 +102,7 @@ func (r *OrderRepository) RecordPaymentEvent(ctx context.Context, ev app.Payment
 
 		o, err := loadOrder(ctx, tx, "payment_id = $1", string(ev.PaymentID), "FOR UPDATE")
 		if errors.Is(err, app.ErrOrderNotFound) {
+			// Ninguna orden tiene aún este payment_id: no hay correlation-id que unir. El log lleva payment_id.
 			res = app.PaymentEventResult{Outcome: app.PaymentPendingOrder}
 			return nil
 		}
