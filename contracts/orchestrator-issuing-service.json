@@ -1,0 +1,104 @@
+{
+  "consumer": "orchestrator",
+  "provider": "issuing-service",
+  "interactions": [
+    {
+      "name": "issue a new policy",
+      "providerState": "legacy-issues",
+      "request": {
+        "method": "POST",
+        "path": "/policies",
+        "body": {
+          "externalRef": "order-1",
+          "quoteId": "qt_1",
+          "premium": 412000.0,
+          "currency": "COP",
+          "plate": "ABC123",
+          "documentId": "1020304050",
+          "vehicleYear": 2020,
+          "cityCode": "11001"
+        }
+      },
+      "response": { "status": 201, "body": { "policyNumber": "POL-2026-000007" } },
+      "exact": ["policyNumber"],
+      "consumerExpects": "issued"
+    },
+    {
+      "name": "issue a policy that already exists",
+      "providerState": "legacy-already-issued",
+      "request": {
+        "method": "POST",
+        "path": "/policies",
+        "body": {
+          "externalRef": "order-1",
+          "quoteId": "qt_1",
+          "premium": 412000.0,
+          "currency": "COP",
+          "plate": "ABC123",
+          "documentId": "1020304050",
+          "vehicleYear": 2020,
+          "cityCode": "11001"
+        }
+      },
+      "response": { "status": 200, "body": { "policyNumber": "POL-2026-000003" } },
+      "exact": ["policyNumber"],
+      "consumerExpects": "issued"
+    },
+    {
+      "name": "business rejection",
+      "providerState": "legacy-rejects-invalid-plate",
+      "request": {
+        "method": "POST",
+        "path": "/policies",
+        "body": {
+          "externalRef": "order-1",
+          "quoteId": "qt_1",
+          "premium": 412000.0,
+          "currency": "COP",
+          "plate": "ABC123",
+          "documentId": "1020304050",
+          "vehicleYear": 2020,
+          "cityCode": "11001"
+        }
+      },
+      "response": { "status": 422, "body": { "code": "INVALID_PLATE" } },
+      "exact": ["code"],
+      "consumerExpects": "rejected"
+    },
+    {
+      "name": "legacy issuer unavailable",
+      "providerState": "legacy-down",
+      "request": {
+        "method": "POST",
+        "path": "/policies",
+        "body": {
+          "externalRef": "order-1",
+          "quoteId": "qt_1",
+          "premium": 412000.0,
+          "currency": "COP",
+          "plate": "ABC123",
+          "documentId": "1020304050",
+          "vehicleYear": 2020,
+          "cityCode": "11001"
+        }
+      },
+      "response": { "status": 503 },
+      "consumerExpects": "transient"
+    },
+    {
+      "name": "look up an issued policy",
+      "providerState": "legacy-already-issued",
+      "request": { "method": "GET", "path": "/policies", "query": { "externalRef": "order-1" } },
+      "response": { "status": 200, "body": { "policyNumber": "POL-2026-000003" } },
+      "exact": ["policyNumber"],
+      "consumerExpects": "found"
+    },
+    {
+      "name": "look up a policy that does not exist",
+      "providerState": "legacy-has-no-policy",
+      "request": { "method": "GET", "path": "/policies", "query": { "externalRef": "order-1" } },
+      "response": { "status": 404 },
+      "consumerExpects": "not-found"
+    }
+  ]
+}

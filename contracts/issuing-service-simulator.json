@@ -1,0 +1,231 @@
+{
+  "consumer": "issuing-service",
+  "provider": "simulator",
+  "interactions": [
+    {
+      "name": "issue a policy with the verbose legacy contract",
+      "providerState": "calm",
+      "request": {
+        "method": "POST",
+        "path": "/issue",
+        "dynamic": [
+          "header.transactionId",
+          "header.requestDate"
+        ],
+        "body": {
+          "header": {
+            "transactionId": "tx-order-1",
+            "channel": "DIGITAL",
+            "requestDate": "20261024100000"
+          },
+          "policyRequest": {
+            "externalRef": "order-1",
+            "externalReference": "order-1",
+            "product": {
+              "code": "SOAT",
+              "productCode": "SOAT"
+            },
+            "vehicle": {
+              "plate": "ABC123",
+              "plateNumber": "ABC123",
+              "modelYear": "2020",
+              "cityCode": "11001"
+            },
+            "holder": {
+              "document": {
+                "type": "CC",
+                "number": "1020304050"
+              },
+              "documentNumber": "1020304050"
+            },
+            "premium": {
+              "amount": "412000.00",
+              "value": 412000.0,
+              "currency": "COP"
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "result": "OK",
+          "data": {
+            "policy": {
+              "policyNumber": "POL-2026-000001",
+              "externalRef": "order-1"
+            }
+          }
+        }
+      },
+      "exact": [
+        "result",
+        "data.policy.externalRef"
+      ],
+      "consumerExpects": "issued"
+    },
+    {
+      "name": "business error hidden in a 200",
+      "providerState": "issuer-business-error",
+      "request": {
+        "method": "POST",
+        "path": "/issue",
+        "dynamic": [
+          "header.transactionId",
+          "header.requestDate"
+        ],
+        "body": {
+          "header": {
+            "transactionId": "tx-order-1",
+            "channel": "DIGITAL",
+            "requestDate": "20261024100000"
+          },
+          "policyRequest": {
+            "externalRef": "order-1",
+            "externalReference": "order-1",
+            "product": {
+              "code": "SOAT",
+              "productCode": "SOAT"
+            },
+            "vehicle": {
+              "plate": "ABC123",
+              "plateNumber": "ABC123",
+              "modelYear": "2020",
+              "cityCode": "11001"
+            },
+            "holder": {
+              "document": {
+                "type": "CC",
+                "number": "1020304050"
+              },
+              "documentNumber": "1020304050"
+            },
+            "premium": {
+              "amount": "412000.00",
+              "value": 412000.0,
+              "currency": "COP"
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "result": "ERROR",
+          "code": "E-102"
+        }
+      },
+      "exact": [
+        "result",
+        "code"
+      ],
+      "consumerExpects": "rejected"
+    },
+    {
+      "name": "technical error hidden in a 200",
+      "providerState": "issuer-technical-error",
+      "request": {
+        "method": "POST",
+        "path": "/issue",
+        "dynamic": [
+          "header.transactionId",
+          "header.requestDate"
+        ],
+        "body": {
+          "header": {
+            "transactionId": "tx-order-1",
+            "channel": "DIGITAL",
+            "requestDate": "20261024100000"
+          },
+          "policyRequest": {
+            "externalRef": "order-1",
+            "externalReference": "order-1",
+            "product": {
+              "code": "SOAT",
+              "productCode": "SOAT"
+            },
+            "vehicle": {
+              "plate": "ABC123",
+              "plateNumber": "ABC123",
+              "modelYear": "2020",
+              "cityCode": "11001"
+            },
+            "holder": {
+              "document": {
+                "type": "CC",
+                "number": "1020304050"
+              },
+              "documentNumber": "1020304050"
+            },
+            "premium": {
+              "amount": "412000.00",
+              "value": 412000.0,
+              "currency": "COP"
+            }
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "result": "ERROR",
+          "code": "E-901"
+        }
+      },
+      "exact": [
+        "result",
+        "code"
+      ],
+      "consumerExpects": "transient"
+    },
+    {
+      "name": "look up an issued policy",
+      "providerState": "policy-issued-for-order-1",
+      "request": {
+        "method": "GET",
+        "path": "/policies",
+        "query": {
+          "externalRef": "order-1"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "result": "OK",
+          "policies": [
+            {
+              "policyNumber": "POL-2026-000001",
+              "externalRef": "order-1"
+            }
+          ]
+        }
+      },
+      "exact": [
+        "result"
+      ],
+      "consumerExpects": "found"
+    },
+    {
+      "name": "look up a policy that does not exist (empty list, never 404)",
+      "providerState": "calm",
+      "request": {
+        "method": "GET",
+        "path": "/policies",
+        "query": {
+          "externalRef": "order-1"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "result": "OK",
+          "policies": []
+        }
+      },
+      "exact": [
+        "result"
+      ],
+      "consumerExpects": "not-found"
+    }
+  ]
+}
