@@ -93,6 +93,34 @@ func TestRecordPaymentEvent_DuplicateHasNoEffect(t *testing.T) {
 	}
 }
 
+// El log del reenvío debe unirse con la compra: el duplicado devuelve la orden y su correlation-id.
+func TestRecordPaymentEvent_DuplicateReturnsOrderCorrelation(t *testing.T) {
+	pool := testPool(t)
+	repo := NewOrderRepository(pool)
+	ctx := context.Background()
+	in := newOrder(t)
+	in.CorrelationID = "corr-dup"
+	o, _, err := repo.Create(ctx, app.IdempotencyKey{Key: "k", RequestHash: "h"}, in, createdEvent())
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.Quote = &order.Quote{ID: "q-1", Premium: "850000.00", Currency: "COP", ValidUntil: time.Now().Add(time.Hour)}
+	ev, _ := o.Transition(order.Quoted, "quote received", time.Now())
+	if err := repo.SaveTransition(ctx, o, ev); err != nil {
+		t.Fatal(err)
+	}
+	markPending(t, repo, o, "pay-1")
+	if _, err := repo.RecordPaymentEvent(ctx, paymentEvent("pay-1", order.PaymentApproved), applyDomain); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := repo.RecordPaymentEvent(ctx, paymentEvent("pay-1", order.PaymentApproved), applyDomain)
+
+	if err != nil || res.Outcome != app.PaymentDuplicate || res.OrderID != o.ID || res.CorrelationID != "corr-dup" {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+}
+
 // Caso exigido: APPROVED llega antes de que la orden quede en PAYMENT_PENDING.
 func TestPaymentApprovedBeforePending_IsAppliedWhenPendingIsSaved(t *testing.T) {
 	pool := testPool(t)
