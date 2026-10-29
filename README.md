@@ -40,6 +40,8 @@ _El enlace (YouTube, no listado) se agrega al grabarlo._ Agenda: arquitectura y 
 
 ## 3. Arquitectura
 
+### Diagrama de arquitectura
+
 ```mermaid
 flowchart LR
     subgraph Operaciones
@@ -80,7 +82,9 @@ flowchart LR
 
 **Cómo fluye una compra:** el orquestador crea la orden con su `Idempotency-Key`, cotiza (reintentos con backoff y jitter) y pide el pago. El webhook del PSP llega firmado, se deduplica y se aplica en orden lógico aunque llegue desordenado. Cada paso asíncrono se guarda en la **outbox** en la misma transacción que el cambio de estado; un despachador lo publica en RabbitMQ y los workers lo procesan con reintentos por TTL y DLQ. La emisión pasa por la **capa anticorrupción** detrás de un circuit breaker: con el circuito abierto, el comando se aplaza sin consumir intentos. El **reconciliador** revisa las órdenes atascadas y consulta al emisor antes de reintentar. Todo el recorrido lleva un **correlation-id por compra** (ADR 0006).
 
-**Estados de la orden** (fuente única: [`orchestrator/internal/order/status.go`](orchestrator/internal/order/status.go)):
+### Diagrama de estados de la orden
+
+Fuente única: [`orchestrator/internal/order/status.go`](orchestrator/internal/order/status.go).
 
 ```mermaid
 stateDiagram-v2
@@ -104,7 +108,9 @@ stateDiagram-v2
 
 Regla clave: **una orden pagada nunca pasa a FAILED.** Si el emisor la rechaza por negocio (422), queda en `REFUND_REQUIRED` y operaciones decide desde la consola, con la acción auditada. Si se agotan los reintentos por fallas transitorias, queda en `ISSUING`: un timeout no prueba que la póliza no exista, y la reconciliación consulta al emisor antes de decidir (ADR 0003 y 0004).
 
-**Orquestador en Go** (hexagonal liviana: las dependencias apuntan hacia `order`):
+### Paquetes del orquestador en Go
+
+Hexagonal liviana: las dependencias apuntan hacia `order`.
 
 | Paquete | Responsabilidad |
 |---|---|
@@ -114,9 +120,11 @@ Regla clave: **una orden pagada nunca pasa a FAILED.** Si el emisor la rechaza p
 | `internal/httpapi` | Rutas, firma HMAC del webhook, JWT, SSE, health checks y contrato OpenAPI |
 | `internal/auth`, `internal/trace` | Login con bcrypt y JWT; correlation-id en el contexto y en los logs |
 
-**Arquitectura objetivo en AWS** (Bloque 4): en [`docs/architecture.md`](docs/architecture.md), con el diagrama, la justificación de cómputo, mensajería, persistencia y borde, los secretos, los SLI/SLO, el costo, el primer cuello de botella y el borrado según la Ley 1581. La IaC está en [`infra/terraform/messaging`](infra/terraform/messaging).
+### Arquitectura objetivo en AWS
 
-**Estructura del repositorio**
+Está en [`docs/architecture.md`](docs/architecture.md) (Bloque 4), con el diagrama, la justificación de cómputo, mensajería, persistencia y borde, los secretos, los SLI/SLO, el costo, el primer cuello de botella y el borrado según la Ley 1581. La IaC está en [`infra/terraform/messaging`](infra/terraform/messaging).
+
+### Estructura del repositorio
 
 ```
 ├── orchestrator/      orquestador Go (cmd/, internal/, api/openapi.yaml)
