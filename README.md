@@ -43,6 +43,9 @@ _El enlace (YouTube, no listado) se agrega al grabarlo._ Agenda: arquitectura y 
 ### Diagrama de arquitectura
 
 ```mermaid
+---
+title: Diagrama de arquitectura
+---
 flowchart LR
     subgraph Operaciones
         OP["Operador<br/>navegador"]
@@ -87,6 +90,9 @@ flowchart LR
 Fuente única: [`orchestrator/internal/order/status.go`](orchestrator/internal/order/status.go).
 
 ```mermaid
+---
+title: Diagrama de estados de la orden
+---
 stateDiagram-v2
     direction LR
     [*] --> CREATED
