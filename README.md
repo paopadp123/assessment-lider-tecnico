@@ -71,16 +71,16 @@ flowchart LR
         PSP["Pasarela de pagos"]
         LEG["Emisor legado"]
     end
-    CLI["Canal de venta<br/>cliente API"] -- "POST /orders<br/>Idempotency-Key" --> H
+    CLI["Canal de venta<br/>cliente API"] -- "#nbsp;POST /orders#nbsp;<br/>#nbsp;Idempotency-Key#nbsp;" --> H
     OP -- "HTTPS" --> BFF
-    BFF -- "Bearer JWT · SSE" --> H
-    ADP -- "SQL · outbox<br/>SKIP LOCKED" --> PG
+    BFF -- "#nbsp;Bearer JWT · SSE#nbsp;" --> H
+    ADP -- "#nbsp;SQL · outbox#nbsp;<br/>#nbsp;SKIP LOCKED#nbsp;" --> PG
     ADP -- "publica<br/>y consume" --> MQ
-    ADP -- "X-Correlation-ID" --> Q
-    ADP -- "Idempotency-Key<br/>= orderId" --> PSP
-    PSP -. "webhook firmado<br/>duplicados<br/>desorden" .-> H
+    ADP -- "#nbsp;X-Correlation-ID#nbsp;" --> Q
+    ADP -- "#nbsp;Idempotency-Key#nbsp;<br/>#nbsp;= orderId#nbsp;" --> PSP
+    PSP -. "#nbsp;webhook firmado#nbsp;<br/>#nbsp;duplicados#nbsp;<br/>#nbsp;desorden#nbsp;" .-> H
     ADP -- "circuit breaker" --> ISS
-    ISS -- "contrato verboso<br/>consulta antes<br/>de reintentar" --> LEG
+    ISS -- "#nbsp;contrato verboso#nbsp;<br/>#nbsp;consulta antes#nbsp;<br/>#nbsp;de reintentar#nbsp;" --> LEG
 ```
 
 **Cómo fluye una compra:** el orquestador crea la orden con su `Idempotency-Key`, cotiza (reintentos con backoff y jitter) y pide el pago. El webhook del PSP llega firmado, se deduplica y se aplica en orden lógico aunque llegue desordenado. Cada paso asíncrono se guarda en la **outbox** en la misma transacción que el cambio de estado; un despachador lo publica en RabbitMQ y los workers lo procesan con reintentos por TTL y DLQ. La emisión pasa por la **capa anticorrupción** detrás de un circuit breaker: con el circuito abierto, el comando se aplaza sin consumir intentos. El **reconciliador** revisa las órdenes atascadas y consulta al emisor antes de reintentar. Todo el recorrido lleva un **correlation-id por compra** (ADR 0006).
