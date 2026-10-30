@@ -126,6 +126,12 @@ func run(logger *slog.Logger) error {
 	dispatcher := app.NewDispatcher(repo, publisher, logger)
 	reconciler := app.NewReconciler(repo, repo, quoteClient, policyIssuer, logger, stuckAfter)
 	operatorActions := app.NewOperatorActions(repo, logger)
+	reportDriverAlert := app.NewReportDriverAlert(postgres.NewDriverAlertRepository(pool), logger)
+	// Opcional: sin token, la API de la app del conductor responde 401 (el resto del sistema no la necesita).
+	driverToken := os.Getenv("DRIVER_DEVICE_TOKEN")
+	if driverToken == "" {
+		logger.Warn("DRIVER_DEVICE_TOKEN not set: POST /driver/alerts answers 401")
+	}
 
 	authService, err := auth.NewService(postgres.NewOperatorRepository(pool), []byte(jwtSecret), time.Hour)
 	if err != nil {
@@ -146,6 +152,7 @@ func run(logger *slog.Logger) error {
 		Login:    httpapi.NewLogin(authService, httpapi.NewIPRateLimiter(5), logger),
 		Ops:      ops,
 		Console:  httpapi.NewConsole(repo, repo, logger),
+		Driver:   httpapi.NewDriver(reportDriverAlert, driverToken, logger),
 		Breakers: httpapi.Breakers(func() httpapi.BreakerStatus {
 			st := breaker.Status()
 			return httpapi.BreakerStatus{Name: st.Name, State: st.State, ConsecutiveFailures: st.ConsecutiveFailures}

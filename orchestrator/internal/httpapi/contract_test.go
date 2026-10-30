@@ -56,6 +56,7 @@ func testHandlers(creator OrderCreator, reader OrderReader, actions *fakeActions
 		Login:    NewLogin(operators, NewIPRateLimiter(5), discard()),
 		Ops:      ops,
 		Console:  NewConsole(&fakeLister{page: app.OrderPage{Orders: []order.Order{contractOrder()}, Next: &app.OrderCursor{CreatedAt: time.Now(), ID: orderID}}}, fakeCalls{calls: contractCalls}, discard()),
+		Driver:   NewDriver(&fakeDriverReporter{created: true}, testDeviceToken, discard()),
 		Breakers: Breakers(func() BreakerStatus { return BreakerStatus{Name: "policy-issuer", State: "closed"} }),
 		Ready:    ready,
 		Require:  RequireOperator(operators),
@@ -179,6 +180,9 @@ func TestContract_ResponsesMatchSchemas(t *testing.T) {
 		{name: "listo", method: http.MethodGet, path: "/health/ready"},
 		{name: "no listo", method: http.MethodGet, path: "/health/ready", ready: notReady},
 		{name: "contrato", method: http.MethodGet, path: "/openapi.yaml"},
+		{name: "alerta de pánico", method: http.MethodPost, path: "/driver/alerts", body: alertBody(time.Now()), token: testDeviceToken},
+		{name: "alerta sin token de dispositivo", method: http.MethodPost, path: "/driver/alerts", body: alertBody(time.Now())},
+		{name: "alerta inválida", method: http.MethodPost, path: "/driver/alerts", body: `{"alertId":"x"}`, token: testDeviceToken},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

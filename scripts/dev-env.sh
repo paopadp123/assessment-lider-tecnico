@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Crea el .env de la raíz a partir de .env.example y genera los secretos que la plantilla deja vacíos
-# (JWT_SECRET, PSP_WEBHOOK_SECRET, OPS_BOOTSTRAP_PASSWORD). Si el .env ya existe, no lo toca.
+# (JWT_SECRET, PSP_WEBHOOK_SECRET, DRIVER_DEVICE_TOKEN, OPS_BOOTSTRAP_PASSWORD). Si el .env ya existe, no lo toca.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -21,6 +21,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
   case "$line" in
     JWT_SECRET=) echo "JWT_SECRET=$(secret)" ;;
     PSP_WEBHOOK_SECRET=) echo "PSP_WEBHOOK_SECRET=$(secret)" ;;
+    DRIVER_DEVICE_TOKEN=) echo "DRIVER_DEVICE_TOKEN=$(secret)" ;;
     OPS_BOOTSTRAP_PASSWORD=) echo "OPS_BOOTSTRAP_PASSWORD=$(password)" ;;
     *) echo "$line" ;;
   esac

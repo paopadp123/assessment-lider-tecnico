@@ -8,10 +8,13 @@ Compra de una póliza vehicular digital que cruza tres terceros que fallan de fo
 | `issuing-service/` | Capa anticorrupción del emisor (C# / .NET) |
 | `console/` | Consola de operaciones (Next.js + TypeScript) |
 | `simulator/` | Simuladores de terceros e inyección de caos |
-| `infra/` | Infraestructura como código |
-| `review/` | Informe de code review |
-| `lead/` | Liderazgo técnico |
-| `docs/adr/` | Decisiones de arquitectura |
+| `mobile/` | App React Native del conductor (prototipo, bonus del Bloque 3) |
+| `contracts/` | Contratos compartidos entre servicios (pruebas de contrato, bonus) |
+| `infra/` | Infraestructura como código (Terraform de la cola de emisión) |
+| [`review/`](review/README.md) | Informe de code review (Bloque 2) |
+| [`lead/`](lead/README.md) | Liderazgo técnico (Bloque 5) |
+| [`docs/adr/`](docs/adr) | Decisiones de arquitectura (ADR 0001–0008) |
+| [`docs/`](docs) | Arquitectura en AWS, memorando móvil, guion de la demo y bitácora de IA |
 
 ## 1. Cómo levantar todo en un comando
 Requisitos: Docker con Compose v2, bash (en Windows, Git Bash), `curl`, `jq` y `openssl`.
@@ -33,53 +36,63 @@ bash scripts/e2e/run-all.sh              # los 4 escenarios de punta a punta (~1
 Los escenarios (compra feliz, timeout pero emitió, caída del emisor con recuperación y pago aprobado con emisión rechazada) están en [`docs/demo.md`](docs/demo.md), que también es el guion del video. El CI los corre en cada push (job `e2e`). La consola está documentada en [`console/README.md`](console/README.md).
 
 ## 2. Video de sustentación
-_Pendiente._
+_El enlace (YouTube, no listado) se agrega al grabarlo._ Agenda: arquitectura y las dos decisiones de las que más orgulloso estoy, demostración en vivo (compra exitosa y compra que falla y se recupera), el hallazgo más importante del code review, la decisión sobre la librería móvil y qué haría distinto con un mes y un equipo.
 
 ## 3. Arquitectura
 
+### Diagrama de arquitectura
+
 ```mermaid
+---
+title: Diagrama de arquitectura
+---
 flowchart LR
     subgraph Operaciones
         OP["Operador<br/>navegador"]
     end
     subgraph Console["Consola · Next.js + TypeScript"]
-        BFF["BFF<br/>cookie httpOnly · proxy de la API y del SSE"]
+        BFF["BFF<br/>cookie httpOnly<br/>proxy API y SSE"]
     end
     subgraph Orch["Orquestador · Go"]
         direction TB
-        H["httpapi<br/>órdenes · webhook HMAC · login JWT · acciones · SSE"] --> APP["app<br/>casos de uso · reintentos · breaker · reconciliador"]
-        APP --> DOM["order<br/>máquina de estados · validación · enmascarado"]
-        ADP["adapters<br/>postgres · rabbitmq · quoter · psp · issuer"] --> APP
+        H["httpapi<br/>órdenes · login<br/>webhook HMAC<br/>acciones · SSE"] --> APP["app<br/>casos de uso<br/>reintentos<br/>breaker<br/>reconciliador"]
+        APP --> DOM["order<br/>estados<br/>validación<br/>enmascarado"]
+        ADP["adapters<br/>postgres<br/>rabbitmq<br/>quoter · psp<br/>issuer"] --> APP
     end
     subgraph Datos
-        PG[("PostgreSQL<br/>órdenes · outbox · eventos<br/>llamadas a terceros · operadores")]
-        MQ[["RabbitMQ<br/>comandos · reintentos con TTL<br/>aplazados · DLQ"]]
+        PG[("PostgreSQL<br/>órdenes<br/>outbox<br/>eventos<br/>llamadas API<br/>operadores")]
+        MQ[["RabbitMQ<br/>comandos<br/>reintentos TTL<br/>aplazados<br/>DLQ"]]
     end
     subgraph ACL["Capa de emisión · C# / .NET"]
-        ISS["Contrato limpio · traducción de errores<br/>idempotencia por externalRef"]
+        ISS["contrato limpio<br/>traduce errores<br/>idempotencia<br/>por externalRef"]
     end
     subgraph Terceros["Simulador de terceros · Node + TypeScript (con caos)"]
         Q["Cotizador"]
         PSP["Pasarela de pagos"]
         LEG["Emisor legado"]
     end
-    CLI["Canal de venta<br/>(cliente de la API)"] -- "POST /orders<br/>Idempotency-Key" --> H
+    CLI["Canal de venta<br/>cliente API"] -- "#160;POST /orders#160;<br/>#160;Idempotency-Key#160;" --> H
     OP -- "HTTPS" --> BFF
-    BFF -- "Bearer JWT · SSE" --> H
-    ADP -- "SQL · outbox con SKIP LOCKED" --> PG
-    ADP -- "publica y consume comandos" --> MQ
-    ADP -- "X-Correlation-ID" --> Q
-    ADP -- "Idempotency-Key = orderId" --> PSP
-    PSP -. "webhook firmado<br/>(duplicados, desorden)" .-> H
+    BFF -- "#160;Bearer JWT · SSE#160;" --> H
+    ADP -- "#160;SQL · outbox#160;<br/>#160;SKIP LOCKED#160;" --> PG
+    ADP -- "publica<br/>y consume" --> MQ
+    ADP -- "#160;X-Correlation-ID#160;" --> Q
+    ADP -- "#160;Idempotency-Key#160;<br/>#160;= orderId#160;" --> PSP
+    PSP -. "#160;webhook firmado#160;<br/>#160;duplicados#160;<br/>#160;desorden#160;" .-> H
     ADP -- "circuit breaker" --> ISS
-    ISS -- "contrato verboso<br/>consulta antes de reintentar" --> LEG
+    ISS -- "#160;contrato verboso#160;<br/>#160;consulta antes#160;<br/>#160;de reintentar#160;" --> LEG
 ```
 
 **Cómo fluye una compra:** el orquestador crea la orden con su `Idempotency-Key`, cotiza (reintentos con backoff y jitter) y pide el pago. El webhook del PSP llega firmado, se deduplica y se aplica en orden lógico aunque llegue desordenado. Cada paso asíncrono se guarda en la **outbox** en la misma transacción que el cambio de estado; un despachador lo publica en RabbitMQ y los workers lo procesan con reintentos por TTL y DLQ. La emisión pasa por la **capa anticorrupción** detrás de un circuit breaker: con el circuito abierto, el comando se aplaza sin consumir intentos. El **reconciliador** revisa las órdenes atascadas y consulta al emisor antes de reintentar. Todo el recorrido lleva un **correlation-id por compra** (ADR 0006).
 
-**Estados de la orden** (fuente única: [`orchestrator/internal/order/status.go`](orchestrator/internal/order/status.go)):
+### Diagrama de estados de la orden
+
+Fuente única: [`orchestrator/internal/order/status.go`](orchestrator/internal/order/status.go).
 
 ```mermaid
+---
+title: Diagrama de estados de la orden
+---
 stateDiagram-v2
     direction LR
     [*] --> CREATED
@@ -99,9 +112,11 @@ stateDiagram-v2
     FAILED --> [*]
 ```
 
-Regla clave: **una orden pagada nunca pasa a FAILED.** Si no hay póliza, queda en `REFUND_REQUIRED` y operaciones decide desde la consola, con la acción auditada.
+Regla clave: **una orden pagada nunca pasa a FAILED.** Si el emisor la rechaza por negocio (422), queda en `REFUND_REQUIRED` y operaciones decide desde la consola, con la acción auditada. Si se agotan los reintentos por fallas transitorias, queda en `ISSUING`: un timeout no prueba que la póliza no exista, y la reconciliación consulta al emisor antes de decidir (ADR 0003 y 0004).
 
-**Orquestador en Go** (hexagonal liviana: las dependencias apuntan hacia `order`):
+### Paquetes del orquestador en Go
+
+Hexagonal liviana: las dependencias apuntan hacia `order`.
 
 | Paquete | Responsabilidad |
 |---|---|
@@ -111,15 +126,18 @@ Regla clave: **una orden pagada nunca pasa a FAILED.** Si no hay póliza, queda 
 | `internal/httpapi` | Rutas, firma HMAC del webhook, JWT, SSE, health checks y contrato OpenAPI |
 | `internal/auth`, `internal/trace` | Login con bcrypt y JWT; correlation-id en el contexto y en los logs |
 
-**Arquitectura objetivo en AWS** (Bloque 4): en [`docs/architecture.md`](docs/architecture.md), con el diagrama, la justificación de cómputo, mensajería, persistencia y borde, los secretos, los SLI/SLO, el costo, el primer cuello de botella y el borrado según la Ley 1581. La IaC está en [`infra/terraform/messaging`](infra/terraform/messaging).
+### Arquitectura objetivo en AWS
 
-**Estructura del repositorio**
+Está en [`docs/architecture.md`](docs/architecture.md) (Bloque 4), con el diagrama, la justificación de cómputo, mensajería, persistencia y borde, los secretos, los SLI/SLO, el costo, el primer cuello de botella y el borrado según la Ley 1581. La IaC está en [`infra/terraform/messaging`](infra/terraform/messaging).
+
+### Estructura del repositorio
 
 ```
 ├── orchestrator/      orquestador Go (cmd/, internal/, api/openapi.yaml)
 ├── issuing-service/   capa anticorrupción C# (Domain, Application, Legacy, Http) y pruebas xUnit
 ├── console/           consola Next.js (app/, components/, lib/server = BFF, lib/client)
 ├── simulator/         cotizador, PSP y emisor legado simulados, con /chaos
+├── mobile/            app React Native del conductor (prototipo, bonus del Bloque 3)
 ├── scripts/           generación del .env y escenarios E2E
 ├── docs/              ADR, guion de la demo, bitácora de IA, capturas
 ├── review/            informe del code review (Bloque 2)
@@ -138,9 +156,23 @@ Regla clave: **una orden pagada nunca pasa a FAILED.** Si no hay póliza, queda 
 - [ADR 0007 — Consola con BFF y cookie httpOnly; registro de llamadas a terceros](docs/adr/0007-consola-bff-y-llamadas-a-terceros.md)
 - [ADR 0008 — Go y C#: regla de asignación y un solo dueño por regla de negocio](docs/adr/0008-go-y-csharp-regla-de-asignacion.md) (Bloque 5; el resto del bloque está en [`lead/README.md`](lead/README.md))
 
+Otras piezas con decisiones propias: el [informe del code review](review/README.md), la [arquitectura en AWS](docs/architecture.md), el [memorando móvil](docs/mobile-memo.md) y las [pruebas de contrato](contracts/README.md).
+
+### Por qué no hay reembolso automático
+
+La orden llega a `REFUND_REQUIRED` cuando el pago quedó aprobado y la póliza no se pudo emitir, por una de dos causas: el emisor rechazó la emisión por una regla de negocio (respuesta 422 de la capa de emisión; ADR 0003), o la reconciliación consultó al emisor en tres rondas, la póliza nunca apareció y la emisión se declaró fallida en definitiva (`orchestrator/internal/app/reconcile.go`). Ahí queda visible en la consola y **una persona decide**. Es la decisión correcta por cinco razones:
+
+1. **El rechazo puede tener arreglo.** En la simulación, los rechazos son placa con formato inválido y vehículo con póliza vigente. El primero se corrige con el dato bien escrito; el segundo puede ser la póliza del mismo cliente emitida en un intento anterior, y la capa de emisión ya lo confirma con una consulta antes de responder. La consola permite reintentar la emisión; un reembolso automático cerraría ese camino a un cliente que pagó por una póliza.
+2. **El reembolso es irreversible.** El emisor a veces responde tarde aunque sí emitió. Un reembolso automático podría devolverle el dinero a un cliente que ya quedó asegurado. El sistema evita reemitir a ciegas (consulta por `externalRef` antes de reintentar); reembolsar a ciegas sería el mismo error, con dinero.
+3. **Mover dinero necesita una decisión con responsable.** Un reembolso tiene efectos contables y, como práctica general, lo aprueba alguien distinto del proceso que lo originó. Aquí la acción del operador queda registrada con su usuario en la línea de tiempo de la orden (ADR 0005).
+4. **Se vigila sin automatizarlo.** El SLO "ningún pago sin resolver" mide que cada orden pagada tenga póliza o una acción de operador en 30 minutos, y hay una alerta para las que esperan una acción ([`docs/architecture.md`](docs/architecture.md), sección 5). El SLO es una meta, no una garantía: si se incumple, la alerta lo hace visible.
+5. **Se puede automatizar después, con evidencia.** Si los datos muestran una categoría de rechazo que durante meses nunca terminó en emisión, esa categoría se automatiza con un reembolso idempotente por `orderId`. Primero se mide; después se automatiza.
+
 ## 5. Arquitectura móvil
 
 **Decisión sobre la librería:** no adoptamos `mauron85/react-native-background-geolocation` (sin código nuevo desde 2019; falla al iniciar en Android 12+ y no declara lo que Android 14 exige). Recomendamos Transistorsoft v5 tras un piloto, con `expo-location` como plan B. Evidencia, costo total a 3 años y condiciones de reversión en el [memorando](docs/mobile-memo.md).
+
+**Prototipo funcional** ([`mobile/`](mobile/README.md)): app React Native 0.86.2 conectada al orquestador, con estado de conexión, viaje actual, botón de pánico e historial local. Implementa en pequeño el reto offline de abajo: la alerta se guarda primero en el teléfono, se envía con un UUID propio (`POST /driver/alerts` es idempotente por ese id) y se reintenta con espera exponencial y jitter. Verificada con el APK de release en un emulador: con el orquestador apagado queda pendiente y, al volver, llega una sola vez.
 
 Esquema de reporte que asumen las cuatro respuestas: **una posición cada 10 s mientras el vehículo se mueve, agrupadas en un mensaje MQTT por minuto** hacia AWS IoT Core, como en [`docs/architecture.md`](docs/architecture.md). Detenido, no se envían posiciones. La arquitectura dimensiona el costo con envíos las 24 horas: es la cota superior.
 
@@ -556,4 +588,26 @@ Antigravity hizo la primera pasada sobre los tres repositorios con las áreas de
 **4. Practicantes.** Las primeras dos semanas resuelven sus tareas de aprendizaje sin generar código con IA; pueden usarla como tutor, pidiendo explicaciones y no soluciones. Después, cada PR suyo con código generado incluye, en sus palabras, qué hace y por qué así, y en la revisión con su mentor se defiende sin la herramienta abierta. Una vez al mes, una tarea de depuración sin IA. La señal de dependencia sin criterio no es usar la IA: es no poder explicar ni depurar lo que entregó.
 
 ## 7. Decisiones y renuncias
-_Pendiente._
+
+Esto es lo que dejé fuera a propósito, por qué y qué haría con más tiempo. El criterio fue terminar con pruebas lo obligatorio y los bonus antes de abrir algo nuevo.
+
+| Qué quedó fuera | Por qué | Con más tiempo |
+|---|---|---|
+| **Validar la telemetría antes de cotizar** (sección 4.4, opcional) | No tiene peso fijo y tocaba el flujo de compra, que ya estaba estable con los escenarios de punta a punta en verde. Prioricé terminar los bloques obligatorios y los bonus. | Un cuarto tercero en el simulador con caos, un cliente con timeout, reintentos y breaker, y un ADR sobre qué hacer si la telemetría no responde: cotizar igual y marcar la orden (*fail-open*) o rechazar (*fail-closed*). Me inclino por *fail-open* con revisión posterior: un servicio de apoyo caído no debería detener las ventas. |
+| **Despliegue real en AWS** | No hay una cuenta de AWS para la prueba. El Terraform cubre el componente crítico (la cola de emisión con DLQ, IAM y alarmas) y el CI lo valida con `fmt` y `validate`, sin `plan` ni `apply`. | Módulos de red, ECS y Aurora, `plan` en cada PR con OIDC de GitHub y `apply` aprobado a mano en staging. |
+| **Rotación de secretos con doble llave** (webhook del PSP y JWT) | Está diseñada ([`docs/architecture.md`](docs/architecture.md), sección 4), pero el código acepta una sola llave. Rotar hoy exige una ventana. | Aceptar la firma con la llave actual y la anterior, y firmar solo con la actual. |
+| **La métrica de la orden pagada sin póliza más antigua** | La alarma de guardia del Terraform la usa, pero el orquestador todavía no la publica: está diseñada, no implementada. | Publicarla desde el reconciliador cada minuto. |
+| **Estado en memoria por réplica** (breaker y límite de intentos del login) | Correcto con una réplica, que es lo que corre aquí. Con N réplicas, cada una aprende la caída por su cuenta y el límite de intentos se multiplica por N (ADR 0003 y 0005). | El límite de intentos pasa a AWS WAF. El breaker por réplica se acepta (5·N llamadas fallidas como máximo) o se comparte su estado. |
+| **Roles y revocación de operadores** | Todos los operadores pueden hacer todo y un token vive 60 minutos (ADR 0005). Suficiente para la consola de la prueba. | Roles (ver frente a actuar sobre una orden) y una lista de revocación. |
+| **Trazas distribuidas (OpenTelemetry)** | El correlation-id por compra ya permite seguir una compra completa en los logs (ADR 0006). OpenTelemetry agrega infraestructura sin cambiar lo que se puede responder hoy. | OpenTelemetry encima del correlation-id, para medir el tiempo de cada salto. |
+| **Contrato del webhook del PSP** | Las pruebas de contrato cubren las llamadas entre servicios. El webhook (el simulador llama al orquestador) lo cubren las pruebas de cada lado y el escenario de punta a punta, no un contrato compartido. | Agregarlo a `contracts/`, con la firma HMAC. |
+| **Pruebas de carga** | El bonus pide pruebas de contrato o de carga, y elegí las de contrato: detectan rupturas entre servicios en cada PR, mientras que una prueba de carga contra un compose local diría poco sobre producción. | k6 a 50 solicitudes por segundo contra staging, midiendo el p95 de la creación y cómo crece la cola de emisión con el emisor degradado. |
+| **Prototipo móvil incompleto** | Se verificó en Android. iOS no se compiló, no tiene GPS (es la decisión del memorando), las alertas no aparecen en la consola y el gesto de mantener 2 s no tiene prueba automática. | Piloto con la librería del memorando, iOS y una vista de alertas en la consola. |
+| **Deuda del PR en el fork de golang-gin** | El PR corrige los hallazgos más severos. Quedan para un segundo PR: responder 503 (no 401) cuando cae la base, documentar en vez de silenciar un aviso del linter y una línea desactualizada de `AGENTS.md` ([`review/README.md`](review/README.md)). | Ese segundo PR, con sus pruebas. |
+
+**Con un mes y un equipo,** en este orden:
+1. **Staging en AWS** con todo el Terraform y despliegue continuo: lo que no corre en un ambiente parecido a producción no está probado de verdad.
+2. **Observabilidad real:** las métricas de los SLO, la métrica de la orden pagada sin póliza y OpenTelemetry. Hoy el sistema se puede depurar; todavía no se puede operar con alertas.
+3. **Seguridad operativa:** rotación con doble llave, roles de operadores y el límite de intentos en WAF.
+4. **La telemetría** (sección 4.4) y el **piloto móvil** con 50 vehículos, para medir batería, datos y posiciones perdidas antes de decidir la librería en firme.
+5. **Pruebas de carga y de caos en staging**, para validar el primer cuello de botella que predice la arquitectura (el emisor legado).
