@@ -51,36 +51,36 @@ flowchart LR
         OP["Operador<br/>navegador"]
     end
     subgraph Console["Consola · Next.js + TypeScript"]
-        BFF["BFF<br/>cookie httpOnly · proxy de la API y del SSE"]
+        BFF["BFF<br/>cookie httpOnly<br/>proxy API y SSE"]
     end
     subgraph Orch["Orquestador · Go"]
         direction TB
-        H["httpapi<br/>órdenes · webhook HMAC · login JWT · acciones · SSE"] --> APP["app<br/>casos de uso · reintentos · breaker · reconciliador"]
-        APP --> DOM["order<br/>máquina de estados · validación · enmascarado"]
-        ADP["adapters<br/>postgres · rabbitmq · quoter · psp · issuer"] --> APP
+        H["httpapi<br/>órdenes · login<br/>webhook HMAC<br/>acciones · SSE"] --> APP["app<br/>casos de uso<br/>reintentos<br/>breaker<br/>reconciliador"]
+        APP --> DOM["order<br/>estados<br/>validación<br/>enmascarado"]
+        ADP["adapters<br/>postgres<br/>rabbitmq<br/>quoter · psp<br/>issuer"] --> APP
     end
     subgraph Datos
-        PG[("PostgreSQL<br/>órdenes · outbox · eventos<br/>llamadas a terceros · operadores")]
-        MQ[["RabbitMQ<br/>comandos · reintentos con TTL<br/>aplazados · DLQ"]]
+        PG[("PostgreSQL<br/>órdenes<br/>outbox<br/>eventos<br/>llamadas API<br/>operadores")]
+        MQ[["RabbitMQ<br/>comandos<br/>reintentos TTL<br/>aplazados<br/>DLQ"]]
     end
     subgraph ACL["Capa de emisión · C# / .NET"]
-        ISS["Contrato limpio · traducción de errores<br/>idempotencia por externalRef"]
+        ISS["contrato limpio<br/>traduce errores<br/>idempotencia<br/>por externalRef"]
     end
     subgraph Terceros["Simulador de terceros · Node + TypeScript (con caos)"]
         Q["Cotizador"]
         PSP["Pasarela de pagos"]
         LEG["Emisor legado"]
     end
-    CLI["Canal de venta<br/>(cliente de la API)"] -- "POST /orders<br/>Idempotency-Key" --> H
+    CLI["Canal de venta<br/>cliente API"] -- "POST /orders<br/>Idempotency-Key" --> H
     OP -- "HTTPS" --> BFF
     BFF -- "Bearer JWT · SSE" --> H
-    ADP -- "SQL · outbox con SKIP LOCKED" --> PG
-    ADP -- "publica y consume comandos" --> MQ
+    ADP -- "SQL · outbox<br/>SKIP LOCKED" --> PG
+    ADP -- "publica<br/>y consume" --> MQ
     ADP -- "X-Correlation-ID" --> Q
-    ADP -- "Idempotency-Key = orderId" --> PSP
-    PSP -. "webhook firmado<br/>(duplicados, desorden)" .-> H
+    ADP -- "Idempotency-Key<br/>= orderId" --> PSP
+    PSP -. "webhook firmado<br/>duplicados<br/>desorden" .-> H
     ADP -- "circuit breaker" --> ISS
-    ISS -- "contrato verboso<br/>consulta antes de reintentar" --> LEG
+    ISS -- "contrato verboso<br/>consulta antes<br/>de reintentar" --> LEG
 ```
 
 **Cómo fluye una compra:** el orquestador crea la orden con su `Idempotency-Key`, cotiza (reintentos con backoff y jitter) y pide el pago. El webhook del PSP llega firmado, se deduplica y se aplica en orden lógico aunque llegue desordenado. Cada paso asíncrono se guarda en la **outbox** en la misma transacción que el cambio de estado; un despachador lo publica en RabbitMQ y los workers lo procesan con reintentos por TTL y DLQ. La emisión pasa por la **capa anticorrupción** detrás de un circuit breaker: con el circuito abierto, el comando se aplaza sin consumir intentos. El **reconciliador** revisa las órdenes atascadas y consulta al emisor antes de reintentar. Todo el recorrido lleva un **correlation-id por compra** (ADR 0006).
