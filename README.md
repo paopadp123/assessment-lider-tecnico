@@ -71,16 +71,16 @@ flowchart LR
         PSP["Pasarela de pagos"]
         LEG["Emisor legado"]
     end
-    CLI["Canal de venta<br/>cliente API"] -- "#nbsp;POST /orders#nbsp;<br/>#nbsp;Idempotency-Key#nbsp;" --> H
+    CLI["Canal de venta<br/>cliente API"] -- "#160;POST /orders#160;<br/>#160;Idempotency-Key#160;" --> H
     OP -- "HTTPS" --> BFF
-    BFF -- "#nbsp;Bearer JWT · SSE#nbsp;" --> H
-    ADP -- "#nbsp;SQL · outbox#nbsp;<br/>#nbsp;SKIP LOCKED#nbsp;" --> PG
+    BFF -- "#160;Bearer JWT · SSE#160;" --> H
+    ADP -- "#160;SQL · outbox#160;<br/>#160;SKIP LOCKED#160;" --> PG
     ADP -- "publica<br/>y consume" --> MQ
-    ADP -- "#nbsp;X-Correlation-ID#nbsp;" --> Q
-    ADP -- "#nbsp;Idempotency-Key#nbsp;<br/>#nbsp;= orderId#nbsp;" --> PSP
-    PSP -. "#nbsp;webhook firmado#nbsp;<br/>#nbsp;duplicados#nbsp;<br/>#nbsp;desorden#nbsp;" .-> H
+    ADP -- "#160;X-Correlation-ID#160;" --> Q
+    ADP -- "#160;Idempotency-Key#160;<br/>#160;= orderId#160;" --> PSP
+    PSP -. "#160;webhook firmado#160;<br/>#160;duplicados#160;<br/>#160;desorden#160;" .-> H
     ADP -- "circuit breaker" --> ISS
-    ISS -- "#nbsp;contrato verboso#nbsp;<br/>#nbsp;consulta antes#nbsp;<br/>#nbsp;de reintentar#nbsp;" --> LEG
+    ISS -- "#160;contrato verboso#160;<br/>#160;consulta antes#160;<br/>#160;de reintentar#160;" --> LEG
 ```
 
 **Cómo fluye una compra:** el orquestador crea la orden con su `Idempotency-Key`, cotiza (reintentos con backoff y jitter) y pide el pago. El webhook del PSP llega firmado, se deduplica y se aplica en orden lógico aunque llegue desordenado. Cada paso asíncrono se guarda en la **outbox** en la misma transacción que el cambio de estado; un despachador lo publica en RabbitMQ y los workers lo procesan con reintentos por TTL y DLQ. La emisión pasa por la **capa anticorrupción** detrás de un circuit breaker: con el circuito abierto, el comando se aplaza sin consumir intentos. El **reconciliador** revisa las órdenes atascadas y consulta al emisor antes de reintentar. Todo el recorrido lleva un **correlation-id por compra** (ADR 0006).
