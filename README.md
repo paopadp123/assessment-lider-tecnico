@@ -28,15 +28,15 @@ bash scripts/e2e/run-all.sh              # los 4 escenarios de punta a punta (~1
 | Servicio | URL |
 |---|---|
 | **Consola de operaciones** | http://localhost:3000 (usuario y contraseña: `OPS_BOOTSTRAP_USER` / `OPS_BOOTSTRAP_PASSWORD` del `.env`) |
-| Orquestador (API + OpenAPI) | http://localhost:8080 · `/openapi.yaml` |
-| Capa de emisión (ACL) | http://localhost:8081 |
-| Simulador de terceros y caos | http://localhost:8090 · `/chaos` |
+| Orquestador (API + OpenAPI) | http://localhost:8080/openapi.yaml · http://localhost:8080/health |
+| Capa de emisión (ACL) | http://localhost:8081/health |
+| Simulador de terceros y caos | http://localhost:8090/chaos · http://localhost:8090/health |
 | RabbitMQ (colas, reintentos, DLQ) | http://localhost:15672 (usuario y clave del `.env`) |
 
 Los escenarios (compra feliz, timeout pero emitió, caída del emisor con recuperación y pago aprobado con emisión rechazada) están en [`docs/demo.md`](docs/demo.md), que también es el guion del video. El CI los corre en cada push (job `e2e`). La consola está documentada en [`console/README.md`](console/README.md).
 
 ## 2. Video de sustentación
-_El enlace (YouTube, no listado) se agrega al grabarlo._ Agenda: arquitectura y las dos decisiones de las que más orgulloso estoy, demostración en vivo (compra exitosa y compra que falla y se recupera), el hallazgo más importante del code review, la decisión sobre la librería móvil y qué haría distinto con un mes y un equipo.
+**[Ver el video en YouTube (no listado)](https://youtu.be/ZPKPOVawu0I)**. Agenda: arquitectura y las dos decisiones de las que más orgulloso estoy, demostración en vivo (compra exitosa y compra que falla y se recupera), el hallazgo más importante del code review, la decisión sobre la librería móvil y qué haría distinto con un mes y un equipo.
 
 ## 3. Arquitectura
 
